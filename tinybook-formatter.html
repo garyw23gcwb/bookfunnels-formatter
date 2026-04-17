@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tinybook Formatter - bookfunnels.io</title>
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    input:focus, textarea:focus { border-color: #20BDD4 !important; outline: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState } = React;
+
+    const BRAND = {
+      navy: "#1A212C", deepTeal: "#1C4057", teal: "#20BDD4", blue: "#3D87CC",
+      light: "#EFF6FB", white: "#FFFFFF", textPrimary: "#1A212C",
+      textSecondary: "#4A5568", textMuted: "#94A3B8", border: "#E2E8F0",
+      borderLight: "#F1F5F9", bgSubtle: "#F8FAFC", success: "#10B981", danger: "#EF4444",
+    };
+
+    const FONT = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+
+    const SPEC = {
+      pageW: 360, pageH: 576, bodySize: 10, lineHeight: 15, paraGap: 5,
+      headerSize: 8, chapterNumSize: 16, chapterTitleSize: 20,
+      epigraphSize: 18, dropCapSize: 35, dropCapLines: 3,
+      margins: {
+        verso: { inside: 42, outside: 66, top: 24, bottom: 30 },
+        recto: { inside: 66, outside: 42, top: 24, bottom: 30 },
+      },
+      pageNumY: 546,
+    };
+
+    function detectChapters(text) {
+      const lines = text.split(/\n/);
+      const chapters = [];
+      let currentChapter = null;
+      let buffer = [];
+      const chapterPatterns = [
+        /^chapter\s+(\d+|[ivxlc]+)\s*$/i,
+        /^chapter\s+(\d+|[ivxlc]+)\s*[:\-\u2013\u2014]\s*(.+)$/i,
+        /^(\d+)\.\s+(.+)$/,
+        /^part\s+(\d+|[ivxlc]+)/i,
+      ];
+      const sectionPatterns = [
+        /^(foreword|preface|introduction|prologue|epilogue|afterword|acknowledgments|acknowledgements|about the author|your next steps|making it happen|conclusion|who should read this book\??|my promise to you)$/i,
+      ];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        let matched = false;
+        let chapterNum = "";
+        let chapterTitle = "";
+
+        for (const pat of chapterPatterns) {
+          const m = line.match(pat);
+          if (m) { chapterNum = "Chapter " + m[1]; chapterTitle = m[2] || ""; matched = true; break; }
+        }
+        if (!matched) {
+          for (const pat of sectionPatterns) {
+            if (pat.test(line)) { chapterNum = ""; chapterTitle = line; matched = true; break; }
+          }
+        }
+
+        if (matched) {
+          if (currentChapter) { currentChapter.body = buffer.join("\n").trim(); chapters.push(currentChapter); }
+          if (chapterNum && !chapterTitle) {
+            for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+              const nextLine = lines[j].trim();
+              if (nextLine && !chapterPatterns.some(function(p) { return p.test(nextLine); })) { chapterTitle = nextLine; i = j; break; }
+            }
+          }
+          currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "" };
+          buffer = [];
+          let checkLines = [];
+          for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+            const nl = lines[j].trim();
+            if (nl) checkLines.push({ line: nl, idx: j });
+          }
+          if (checkLines.length > 0) {
+            const firstContent = checkLines[0].line;
+            if (firstContent.startsWith('"') || firstContent.startsWith("\u201C") || firstContent.startsWith("'")) {
+              let epLines = [];
+              let attrLine = "";
+              for (const cl of checkLines) {
+                if (cl.line.startsWith("- ") || cl.line.startsWith("\u2014") || cl.line.startsWith("\u2013")) {
+                  attrLine = cl.line.replace(/^[-\u2014\u2013]\s*/, ""); i = cl.idx; break;
+                }
+                epLines.push(cl.line); i = cl.idx;
+              }
+              if (epLines.length > 0) {
+                currentChapter.epigraph = epLines.join(" ").replace(/["\u201C\u201D]/g, "");
+                currentChapter.epigraphAttribution = attrLine;
+              }
+            }
+          }
+          continue;
+        }
+        buffer.push(lines[i]);
+      }
+      if (currentChapter) { currentChapter.body = buffer.join("\n").trim(); chapters.push(currentChapter); }
+      return chapters;
+    }
+
+    async function generatePDF(bookData, chapters, onProgress) {
+      onProgress("Loading PDF library...");
+      const jsPDFClass = window.jspdf.jsPDF;
+      const doc = new jsPDFClass({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
+      let pageNum = 0;
+      let bookPageNum = 0;
+
+      function newPage() { if (pageNum > 0) doc.addPage([SPEC.pageW, SPEC.pageH]); pageNum++; }
+      function isRecto() { return pageNum % 2 === 1; }
+      function getMargins() { return isRecto() ? SPEC.margins.recto : SPEC.margins.verso; }
+      function getTextWidth() { const m = getMargins(); return SPEC.pageW - m.inside - m.outside; }
+      function getTextX() { return getMargins().inside; }
+
+      function addRunningHeader(chapterTitle) {
+        const m = getMargins();
+        doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        if (isRecto()) { doc.text(chapterTitle, SPEC.pageW - m.outside, m.top + SPEC.headerSize, { align: "right" }); }
+        else { doc.text(bookData.title, m.inside, m.top + SPEC.headerSize); }
+      }
+
+      function addPageNumber(num) {
+        const m = getMargins();
+        doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        if (isRecto()) { doc.text(String(num), SPEC.pageW - m.outside, SPEC.pageNumY, { align: "right" }); }
+        else { doc.text(String(num), m.inside, SPEC.pageNumY); }
+      }
+
+      function wrapText(text, maxWidth, fontSize, fontStyle) {
+        fontStyle = fontStyle || "normal";
+        doc.setFontSize(fontSize); doc.setFont("helvetica", fontStyle);
+        return doc.splitTextToSize(text, maxWidth);
+      }
+
+      onProgress("Generating front matter...");
+      newPage(); newPage();
+
+      if (bookData.ctaTitle) {
+        newPage();
+        let y = 100;
+        doc.setFillColor(30, 30, 30);
+        doc.rect(getTextX(), y - 20, getTextWidth(), 35, "F");
+        doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(255);
+        doc.text("READER BONUS", SPEC.pageW / 2, y + 2, { align: "center" });
+        doc.setTextColor(30); y += 50;
+        doc.setFontSize(24);
+        const ctaLines = wrapText(bookData.ctaTitle, getTextWidth(), 24, "bold");
+        for (const line of ctaLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 32; }
+        y += 20;
+        if (bookData.ctaBody) {
+          const lines = wrapText(bookData.ctaBody, getTextWidth() - 20, 11);
+          doc.setFontSize(11); doc.setFont("helvetica", "normal");
+          for (const line of lines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 15; }
+        }
+        y += 30;
+        if (bookData.ctaUrl) {
+          doc.setFillColor(30, 30, 30);
+          const urlWidth = doc.getTextWidth(bookData.ctaUrl) + 40;
+          doc.rect(SPEC.pageW / 2 - urlWidth / 2, y - 15, urlWidth, 30, "F");
+          doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(255);
+          doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 3, { align: "center" }); doc.setTextColor(30);
+        }
+        newPage();
+      }
+
+      newPage();
+      let ty = 140;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(28); doc.setTextColor(30);
+      const titleLines = wrapText(bookData.title, getTextWidth(), 28, "bold");
+      for (const line of titleLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 35; }
+      ty += 10; doc.setDrawColor(30); doc.setLineWidth(0.5);
+      doc.line(SPEC.pageW / 2 - 80, ty, SPEC.pageW / 2 + 80, ty); ty += 25;
+      if (bookData.subtitle) {
+        doc.setFont("helvetica", "normal"); doc.setFontSize(16);
+        const subLines = wrapText(bookData.subtitle, getTextWidth(), 16);
+        for (const line of subLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 22; }
+      }
+      ty = 430; doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+      doc.text(bookData.author.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" });
+
+      newPage();
+      ty = 340; doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(60);
+      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" }); ty += 20; }
+      doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, SPEC.pageW / 2, ty, { align: "center" }); ty += 18;
+      const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
+      const copLines = wrapText(copyrightText, getTextWidth() - 40, 9);
+      for (const line of copLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 13; }
+      if (bookData.isbn) { ty += 10; doc.text("ISBN: " + bookData.isbn, SPEC.pageW / 2, ty, { align: "center" }); }
+      doc.setTextColor(30);
+
+      if (bookData.dedication) {
+        newPage(); ty = 150;
+        doc.setFont("helvetica", "italic"); doc.setFontSize(12);
+        const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
+        for (const para of dedLines) {
+          const wrapped = wrapText(para, getTextWidth() - 40, 12, "italic");
+          for (const line of wrapped) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 18; }
+          ty += 12;
+        }
+        newPage();
+      }
+
+      onProgress("Building table of contents...");
+      const tocPageStart = pageNum + 1;
+      newPage(); ty = 60;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(22); doc.setTextColor(30);
+      doc.text("Contents", SPEC.pageW / 2, ty, { align: "center" }); ty += 50;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+      for (let i = 0; i < chapters.length; i++) {
+        doc.text(chapters[i].title || chapters[i].num, getTextX(), ty); ty += 30;
+        if (ty > SPEC.pageH - 80) { newPage(); ty = 60; }
+      }
+      newPage();
+
+      for (let ci = 0; ci < chapters.length; ci++) {
+        const ch = chapters[ci];
+        onProgress("Formatting chapter " + (ci + 1) + " of " + chapters.length + "...");
+        if (!isRecto()) newPage();
+        newPage();
+        bookPageNum = pageNum - tocPageStart - 1;
+        const textW = getTextWidth(); const textX = getTextX();
+        let y = 55;
+
+        if (ch.num) {
+          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
+          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" }); y += 50;
+        }
+        doc.setFont("helvetica", "bold"); doc.setFontSize(SPEC.chapterTitleSize);
+        const titleWrapped = wrapText(ch.title, textW, SPEC.chapterTitleSize, "bold");
+        for (const line of titleWrapped) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 28; }
+        y += 30;
+
+        if (ch.epigraph) {
+          doc.setFont("helvetica", "italic"); doc.setFontSize(14);
+          const epLines = wrapText("\u201C" + ch.epigraph + "\u201D", textW - 40, 14, "italic");
+          for (const line of epLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 20; }
+          if (ch.epigraphAttribution) { y += 5; doc.setFontSize(12); doc.text("- " + ch.epigraphAttribution, SPEC.pageW / 2, y, { align: "center" }); y += 15; }
+          y += 20;
+        } else { y += 30; }
+
+        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        let isFirstPara = true;
+        const maxY = SPEC.pageH - 50;
+
+        for (let pi = 0; pi < paragraphs.length; pi++) {
+          let para = paragraphs[pi];
+          if (isFirstPara && para.length > 0) {
+            const dropLetter = para[0].toUpperCase();
+            const restText = para.slice(1);
+            doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
+            const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
+            doc.text(dropLetter, textX, y + SPEC.dropCapSize * 0.75);
+            doc.setFontSize(SPEC.bodySize);
+            const narrowWidth = textW - dropCapWidth - 5;
+            let remainingText = restText;
+            let lineCount = 0;
+            while (lineCount < SPEC.dropCapLines && remainingText.length > 0) {
+              const narrowLines = wrapText(remainingText, narrowWidth, SPEC.bodySize);
+              if (narrowLines.length > 0) {
+                doc.text(narrowLines[0], textX + dropCapWidth, y + SPEC.lineHeight * 0.8);
+                remainingText = remainingText.slice(narrowLines[0].length).trim();
+                y += SPEC.lineHeight; lineCount++;
+              } else break;
+            }
+            if (remainingText.length > 0) {
+              const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
+              for (const line of fullLines) {
+                if (y > maxY) { newPage(); bookPageNum++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum); y = getMargins().top + 30; }
+                doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
+              }
+            }
+            isFirstPara = false; y += SPEC.paraGap; continue;
+          }
+          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+          const lines = wrapText(para, textW, SPEC.bodySize);
+          for (const line of lines) {
+            if (y > maxY) { newPage(); bookPageNum++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum); y = getMargins().top + 30; }
+            doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
+          }
+          y += SPEC.paraGap;
+        }
+      }
+
+      onProgress("Finalizing PDF...");
+      return doc.output("blob");
+    }
+
+    /* ---- UI Components ---- */
+
+    function StepIndicator({ currentStep, steps }) {
+      return (
+        <div style={{ display: "flex", gap: 4, marginBottom: 32 }}>
+          {steps.map((s, i) => (
+            <div key={i} style={{ flex: 1 }}>
+              <div style={{ height: 3, borderRadius: 2, background: i <= currentStep ? BRAND.teal : BRAND.border, transition: "background 0.3s" }} />
+              <div style={{ fontSize: 11, fontFamily: FONT, color: i <= currentStep ? BRAND.textPrimary : BRAND.textMuted, marginTop: 6, fontWeight: i === currentStep ? 600 : 400 }}>{s}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function Input({ label, value, onChange, placeholder, multiline, rows, serif }) {
+      rows = rows || 3;
+      const baseStyle = {
+        width: "100%", padding: "10px 14px", background: BRAND.white,
+        border: "1px solid " + BRAND.border, borderRadius: 8,
+        color: BRAND.textPrimary, fontSize: 14,
+        fontFamily: serif ? "'Gelasio', Georgia, serif" : FONT,
+        outline: "none", resize: multiline ? "vertical" : "none",
+        transition: "border-color 0.2s", boxSizing: "border-box",
+      };
+      return (
+        <div style={{ marginBottom: 16 }}>
+          {label && <label style={{ display: "block", fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 6, fontWeight: 500 }}>{label}</label>}
+          {multiline ? (
+            <textarea value={value} onChange={function(e) { onChange(e.target.value); }} placeholder={placeholder} rows={rows} style={baseStyle} />
+          ) : (
+            <input value={value} onChange={function(e) { onChange(e.target.value); }} placeholder={placeholder} style={baseStyle} />
+          )}
+        </div>
+      );
+    }
+
+    function Button({ children, onClick, variant, disabled, style: extraStyle }) {
+      variant = variant || "primary";
+      const base = { padding: "10px 20px", borderRadius: 8, border: "none", fontSize: 14, fontFamily: FONT, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", transition: "all 0.2s", opacity: disabled ? 0.5 : 1 };
+      const variants = {
+        primary: { background: BRAND.teal, color: BRAND.white },
+        secondary: { background: "transparent", color: BRAND.textPrimary, border: "1px solid " + BRAND.border },
+      };
+      return <button onClick={disabled ? undefined : onClick} style={Object.assign({}, base, variants[variant], extraStyle)}>{children}</button>;
+    }
+
+    function ChapterCard({ chapter, index, onEdit, onRemove }) {
+      const [expanded, setExpanded] = useState(false);
+      const wordCount = chapter.body.split(/\s+/).filter(Boolean).length;
+      return (
+        <div style={{ background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, padding: 16, marginBottom: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 6, background: BRAND.light, color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, fontFamily: FONT }}>{index + 1}</div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary }}>
+                  {chapter.num && <span style={{ color: BRAND.textMuted, fontWeight: 400 }}>{chapter.num} &middot; </span>}
+                  {chapter.title || "Untitled"}
+                </div>
+                <div style={{ fontSize: 12, fontFamily: FONT, color: BRAND.textMuted, marginTop: 2 }}>{wordCount.toLocaleString()} words{chapter.epigraph ? " \u00b7 has epigraph" : ""}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={function() { setExpanded(!expanded); }} style={{ background: "none", border: "none", color: BRAND.blue, cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px" }}>{expanded ? "Collapse" : "Edit"}</button>
+              <button onClick={function() { onRemove(chapter.id); }} style={{ background: "none", border: "none", color: BRAND.danger + "88", cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px" }}>Remove</button>
+            </div>
+          </div>
+          {expanded && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid " + BRAND.borderLight }}>
+              <Input label="Chapter Number/Label" value={chapter.num} onChange={function(v) { onEdit(chapter.id, "num", v); }} placeholder="e.g. Chapter 1" />
+              <Input label="Chapter Title" value={chapter.title} onChange={function(v) { onEdit(chapter.id, "title", v); }} placeholder="e.g. Discovering The Tinybook Client System" />
+              <Input label="Epigraph (optional)" value={chapter.epigraph} onChange={function(v) { onEdit(chapter.id, "epigraph", v); }} placeholder="Opening quote for the chapter" />
+              <Input label="Epigraph Attribution" value={chapter.epigraphAttribution} onChange={function(v) { onEdit(chapter.id, "epigraphAttribution", v); }} placeholder="e.g. Helen Hayes" />
+              <Input label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} multiline={true} rows={8} serif={true} />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function PagePreview({ bookData, chapters }) {
+      const ch = chapters[0];
+      if (!ch) return null;
+      return (
+        <div style={{ width: 220, height: 352, background: "#fff", borderRadius: 4, overflow: "hidden", flexShrink: 0, border: "1px solid " + BRAND.border, boxShadow: "0 4px 24px rgba(26,33,44,0.1)" }}>
+          <div style={{ padding: "24px 20px 16px", textAlign: "center" }}>
+            {ch.num && <div style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 9, color: "#555", marginBottom: 14 }}>{ch.num}</div>}
+            <div style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 12, fontWeight: 700, color: "#111", lineHeight: 1.3, marginBottom: 12 }}>{ch.title}</div>
+            {ch.epigraph && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 9, color: "#555", lineHeight: 1.4, marginBottom: 3 }}>&ldquo;{ch.epigraph}&rdquo;</div>}
+            {ch.epigraphAttribution && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 8, color: "#888", marginBottom: 12 }}>- {ch.epigraphAttribution}</div>}
+            {ch.body && (
+              <div style={{ textAlign: "justify" }}>
+                <span style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 20, fontWeight: 400, float: "left", lineHeight: 1, marginRight: 3, marginTop: 2, color: "#111" }}>{ch.body[0] ? ch.body[0].toUpperCase() : ""}</span>
+                <span style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 6.5, lineHeight: 1.5, color: "#444" }}>{ch.body.slice(1, 350)}...</span>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    /* ---- Main App ---- */
+
+    function TinybookFormatter() {
+      const [step, setStep] = useState(0);
+      const [generating, setGenerating] = useState(false);
+      const [progress, setProgress] = useState("");
+      const [error, setError] = useState("");
+      const [pdfUrl, setPdfUrl] = useState(null);
+      const [bookData, setBookData] = useState({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
+      const [rawText, setRawText] = useState("");
+      const [chapters, setChapters] = useState([]);
+
+      const loadSampleData = function() {
+        setBookData({
+          title: "Get Big Clients With Tiny Books",
+          subtitle: "The New Mechanics of Earning More and Working Less",
+          author: "Gary White",
+          publisher: "Bestseller Profits Publishing",
+          isbn: "978-1-9193202-1-2",
+          dedication: "To my wife Sammi, my partner in every adventure and the foundation of all we've built together.\n\nTo my daughter Summer, whose laughter reminds me daily why freedom matters.\n\nAnd to Franklin, our golden retriever, whose unrelenting joy on our midweek hikes taught me what true presence looks like.\n\nYou three are my why, the reason I pursue freedom, and the best part of having found it. Thank you for showing me that success without family time isn't success at all.\n\nThis book, like everything I do, is for you.",
+          copyrightText: "",
+          ctaTitle: "Join The 48-Hour Tinybook Challenge",
+          ctaBody: "Finally, quickly and easily create your first (or next) Tinybook and start generating leads in the next 48 hours or less, guaranteed.",
+          ctaUrl: "GetClientsWithBooks.com/Challenge",
+        });
+        setRawText("Chapter 1\nDiscovering The Tinybook Client System\n\n\"The expert in anything was once a beginner.\" - Helen Hayes\n\nMany years earlier, while standing in that Boise conference room, I could feel my heart pounding. There I was, surrounded by the best funnel builders in the world at Russell Brunson's Mastermind.\n\nMy fingers were cramped from hours of repetitive mouse clicking, my eyes burned from staring at the screen, and my desk was littered with empty energy drink cans. But I was in the zone.\n\nWhen they announced the finalists, my heart nearly stopped. Then came the moment when Russell himself pointed to my funnel and said it was the winner. Not just top thirty, but number one.\n\nBut life has a funny way of humbling you just when you think you've made it. I flew home from that Mastermind on cloud nine. I updated my website, I rewrote my freelancer profile, and waited for clients to start pouring in. They didn't.\n\nChapter 2\nT is for \"The Perfect Bait\"\n\n\"The best bait catches the fish without forcing them to bite.\" - Chet Holmes\n\nLong before the birth of the Tinybook Client System, one of the first book marketing campaigns I led was for Brendan Kane's bestselling book.\n\nThe core premise of the book was that building a massive social media following is about implementing a systematic, data-driven approach. To prove this, Brendan built an online following of one million people in just 30 days.\n\nSuch a powerful hook meant that our book sales scaled well. Our specific campaign directly sold 9,077 books in the first 150 Days.");
+        setChapters([]);
+        setStep(0);
+      };
+
+      const updateBook = function(field, value) { setBookData(function(prev) { return Object.assign({}, prev, { [field]: value }); }); };
+      const handleDetectChapters = function() {
+        const detected = detectChapters(rawText);
+        if (detected.length === 0) {
+          setChapters([{ id: Math.random().toString(36).slice(2), num: "Chapter 1", title: "Untitled", epigraph: "", epigraphAttribution: "", body: rawText }]);
+        } else { setChapters(detected); }
+        setStep(2);
+      };
+      const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
+      const handleRemoveChapter = function(id) { setChapters(function(prev) { return prev.filter(function(ch) { return ch.id !== id; }); }); };
+      const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "" }]); }); };
+
+      const handleGenerate = async function() {
+        setGenerating(true); setProgress("Starting..."); setError("");
+        try {
+          const blob = await generatePDF(bookData, chapters, setProgress);
+          if (!blob || blob.size === 0) { setError("PDF generation produced an empty file."); return; }
+          setPdfUrl(URL.createObjectURL(blob));
+          setStep(4);
+        } catch (err) {
+          console.error("PDF generation error:", err);
+          setError("PDF generation failed: " + (err.message || String(err)));
+        } finally {
+          setGenerating(false);
+        }
+      };
+
+      const handleFileUpload = function(e) {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(ev) { setRawText(ev.target.result || ""); };
+        reader.readAsText(file);
+      };
+
+      const steps = ["Book Details", "Manuscript", "Chapters", "Preview", "Download"];
+      const totalWords = chapters.reduce(function(sum, ch) { return sum + ch.body.split(/\s+/).filter(Boolean).length; }, 0);
+
+      return (
+        <div style={{ minHeight: "100vh", background: BRAND.bgSubtle, color: BRAND.textPrimary, fontFamily: FONT }}>
+          {/* Header */}
+          <div style={{ background: BRAND.white, borderBottom: "1px solid " + BRAND.border, padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, " + BRAND.blue + ", " + BRAND.teal + ")", display: "flex", alignItems: "center", justifyContent: "center", color: BRAND.white, fontSize: 14, fontWeight: 700, fontFamily: FONT }}>Tb</div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: BRAND.navy, fontFamily: FONT }}>Tinybook Formatter</div>
+                <div style={{ fontSize: 11, color: BRAND.textMuted, fontFamily: FONT }}>5&times;8 Print-Ready Interior</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button onClick={loadSampleData} style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
+              <div style={{ fontSize: 11, color: BRAND.textMuted, fontWeight: 500, fontFamily: FONT }}>bookfunnels.io</div>
+            </div>
+          </div>
+
+          <div style={{ maxWidth: 720, margin: "0 auto", padding: "24px 20px" }}>
+            <StepIndicator currentStep={step} steps={steps} />
+
+            {step === 0 && (
+              <div>
+                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Book Details</h2>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Enter your book information. These details appear on the title page, copyright page, and running headers.</p>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <Input label="Book Title *" value={bookData.title} onChange={function(v) { updateBook("title", v); }} placeholder="Get Big Clients With Tiny Books" />
+                  <Input label="Author Name *" value={bookData.author} onChange={function(v) { updateBook("author", v); }} placeholder="Gary White" />
+                </div>
+                <Input label="Subtitle" value={bookData.subtitle} onChange={function(v) { updateBook("subtitle", v); }} placeholder="The New Mechanics of Earning More and Working Less" />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <Input label="Publisher" value={bookData.publisher} onChange={function(v) { updateBook("publisher", v); }} placeholder="Bestseller Profits Publishing" />
+                  <Input label="ISBN" value={bookData.isbn} onChange={function(v) { updateBook("isbn", v); }} placeholder="978-1-9193202-1-2" />
+                </div>
+                <Input label="Dedication" value={bookData.dedication} onChange={function(v) { updateBook("dedication", v); }} multiline={true} rows={4} placeholder="To my wife Sammi..." />
+                <div style={{ marginTop: 8, padding: 16, background: BRAND.light, borderRadius: 10, border: "1px solid " + BRAND.border }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: BRAND.navy, fontFamily: FONT }}>Reader Bonus Page (Optional)</div>
+                  <Input label="CTA Title" value={bookData.ctaTitle} onChange={function(v) { updateBook("ctaTitle", v); }} placeholder="Join The 48-Hour Tinybook Challenge" />
+                  <Input label="CTA Description" value={bookData.ctaBody} onChange={function(v) { updateBook("ctaBody", v); }} multiline={true} rows={3} placeholder="Finally, quickly and easily create your first Tinybook..." />
+                  <Input label="CTA URL" value={bookData.ctaUrl} onChange={function(v) { updateBook("ctaUrl", v); }} placeholder="GetClientsWithBooks.com/Challenge" />
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
+                  <Button onClick={function() { setStep(1); }} disabled={!bookData.title || !bookData.author}>Next: Add Manuscript &rarr;</Button>
+                </div>
+              </div>
+            )}
+
+            {step === 1 && (
+              <div>
+                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Manuscript</h2>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Paste your manuscript text or upload a .txt file. The formatter will automatically detect chapters.</p>
+                <label style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid " + BRAND.border, cursor: "pointer", fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary, background: BRAND.white, display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
+                  Upload .txt File
+                  <input type="file" accept=".txt,.md" onChange={handleFileUpload} style={{ display: "none" }} />
+                </label>
+                <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }}
+                  placeholder="Paste your manuscript here..."
+                  style={{ width: "100%", height: 400, padding: 16, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, color: BRAND.textPrimary, fontSize: 13, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.6, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+                  <Button variant="secondary" onClick={function() { setStep(0); }}>&larr; Back</Button>
+                  <Button onClick={handleDetectChapters} disabled={!rawText.trim()}>Detect Chapters &rarr;</Button>
+                </div>
+              </div>
+            )}
+
+            {step === 2 && (
+              <div>
+                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Chapters</h2>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 8, fontFamily: FONT }}>{chapters.length} chapters detected &middot; {totalWords.toLocaleString()} total words</p>
+                <p style={{ color: BRAND.textMuted, fontSize: 12, marginBottom: 20, fontFamily: FONT }}>Click "Edit" on any chapter to adjust titles, epigraphs, or body text.</p>
+                {chapters.map(function(ch, i) { return <ChapterCard key={ch.id} chapter={ch} index={i} onEdit={handleEditChapter} onRemove={handleRemoveChapter} />; })}
+                <button onClick={handleAddChapter} style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px dashed " + BRAND.border, background: "transparent", color: BRAND.textMuted, cursor: "pointer", fontSize: 13, fontFamily: FONT, marginTop: 8 }}>+ Add Chapter</button>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+                  <Button variant="secondary" onClick={function() { setStep(1); }}>&larr; Back</Button>
+                  <Button onClick={function() { setStep(3); }} disabled={chapters.length === 0}>Preview &rarr;</Button>
+                </div>
+              </div>
+            )}
+
+            {step === 3 && (
+              <div>
+                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Preview & Generate</h2>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Review your book details before generating the print-ready PDF.</p>
+                <div style={{ display: "flex", gap: 24, marginBottom: 24 }}>
+                  <PagePreview bookData={bookData} chapters={chapters} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ background: BRAND.white, borderRadius: 10, border: "1px solid " + BRAND.border, padding: 16 }}>
+                      <div style={{ fontSize: 11, fontFamily: FONT, color: BRAND.textMuted, marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Book Summary</div>
+                      {[["Title", bookData.title], ["Author", bookData.author], ["Chapters", chapters.length], ["Total Words", totalWords.toLocaleString()], ["Format", '5" \u00d7 8"']].filter(function(pair) { return pair[1]; }).map(function(pair) {
+                        return (
+                          <div key={pair[0]} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid " + BRAND.borderLight, fontSize: 13, fontFamily: FONT }}>
+                            <span style={{ color: BRAND.textSecondary }}>{pair[0]}</span>
+                            <span style={{ fontWeight: 500, color: BRAND.navy }}>{pair[1]}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+                {generating && (
+                  <div style={{ padding: 16, background: BRAND.light, border: "1px solid " + BRAND.teal + "33", borderRadius: 10, marginBottom: 16, textAlign: "center" }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, fontFamily: FONT, color: BRAND.deepTeal }}>{progress}</div>
+                  </div>
+                )}
+                {error && (
+                  <div style={{ padding: 16, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontFamily: FONT, color: "#991B1B", fontWeight: 500 }}>{error}</div>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+                  <Button variant="secondary" onClick={function() { setStep(2); }}>&larr; Back</Button>
+                  <Button onClick={handleGenerate} disabled={generating}>{generating ? "Generating..." : "Generate PDF"}</Button>
+                </div>
+              </div>
+            )}
+
+            {step === 4 && pdfUrl && (
+              <div style={{ textAlign: "center", paddingTop: 40 }}>
+                <div style={{ width: 64, height: 64, borderRadius: 16, background: BRAND.success + "15", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>&#10003;</div>
+                <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Your Tinybook is Ready</h2>
+                <p style={{ color: BRAND.textSecondary, fontSize: 14, marginBottom: 32, fontFamily: FONT }}>{bookData.title} &middot; {chapters.length} chapters &middot; {totalWords.toLocaleString()} words</p>
+                <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+                  <a href={pdfUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Interior.pdf"} style={{ padding: "12px 28px", borderRadius: 8, background: BRAND.teal, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}>&darr; Download PDF</a>
+                  <Button variant="secondary" onClick={function() { setPdfUrl(null); setStep(3); }}>Back to Preview</Button>
+                </div>
+                <div style={{ marginTop: 40, padding: 16, background: BRAND.white, borderRadius: 10, border: "1px solid " + BRAND.border, textAlign: "left", maxWidth: 480, margin: "40px auto 0" }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Before sending to print:</div>
+                  <div style={{ fontSize: 12, color: BRAND.textSecondary, lineHeight: 1.7, fontFamily: FONT }}>
+                    1. Open the PDF and check all pages render correctly<br />
+                    2. Verify chapter openings start on right-hand (recto) pages<br />
+                    3. Check drop caps display properly at chapter starts<br />
+                    4. Confirm page numbers and running headers are correct<br />
+                    5. Review the table of contents page numbers
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<TinybookFormatter />);
+  </script>
+</body>
+</html>
