@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tinybook Formatter - bookfunnels.io</title>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -113,8 +113,13 @@
 
     async function generatePDF(bookData, chapters, onProgress) {
       onProgress("Loading PDF library...");
-      const jsPDFClass = window.jspdf.jsPDF;
-      const doc = new jsPDFClass({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
+      
+      if (!window.jspdf || !window.jspdf.jsPDF) {
+        throw new Error("jsPDF library not loaded. Please refresh the page and try again. (window.jspdf = " + typeof window.jspdf + ")");
+      }
+      
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
       let pageNum = 0;
       let bookPageNum = 0;
 
