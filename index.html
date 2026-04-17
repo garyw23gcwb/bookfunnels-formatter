@@ -41,9 +41,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.2.0",
+      version: "0.2.1",
       date: "2026-04-17",
       changes: [
+        "0.2.1 - Fixed TOC dot leaders for long titles, TOC now shows chapter titles without 'Chapter X:' prefix (matching real book), wider dot spacing",
         "0.2.0 - Two-pass rendering for accurate TOC page numbers, dot leaders in TOC, improved chapter layout spacing, en-dash attribution",
         "0.1.4 - Fixed epigraph parsing (handles attribution on same line), fixed drop cap text split",
         "0.1.3 - Fixed jsPDF CDN version (2.5.1), added error handling, added version badge",
@@ -351,27 +352,43 @@
 
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
-        const displayTitle = ch.num ? (ch.num + ": " + ch.title) : ch.title;
+        // In the real book TOC, titles are shown without "Chapter X:" prefix
+        // e.g. "Discovering The Tinybook Client System ........... 1"
+        const displayTitle = ch.title || ch.num;
         const pageNumStr = String(chapterPageNumbers[i]);
 
         doc.setFont("helvetica", "normal"); doc.setFontSize(11); doc.setTextColor(30);
         
+        // Reserve space for page number + minimum dot leaders
+        const pageNumWidth = doc.getTextWidth(pageNumStr);
+        const minDotsWidth = 30; // minimum space for dots
+        const maxTitleWidth = tocTextW - pageNumWidth - minDotsWidth - 16;
+        
+        // Truncate title if needed
+        let truncatedTitle = displayTitle;
+        let titleWidth = doc.getTextWidth(truncatedTitle);
+        if (titleWidth > maxTitleWidth) {
+          while (titleWidth > maxTitleWidth && truncatedTitle.length > 10) {
+            truncatedTitle = truncatedTitle.slice(0, -1);
+            titleWidth = doc.getTextWidth(truncatedTitle + "...");
+          }
+          truncatedTitle = truncatedTitle + "...";
+          titleWidth = doc.getTextWidth(truncatedTitle);
+        }
+        
         // Draw title
-        doc.text(displayTitle, tocTextX, ty);
-        const titleWidth = doc.getTextWidth(displayTitle);
+        doc.text(truncatedTitle, tocTextX, ty);
         
         // Draw page number right-aligned
-        const pageNumWidth = doc.getTextWidth(pageNumStr);
         const pageNumX = tocTextX + tocTextW;
         doc.text(pageNumStr, pageNumX, ty, { align: "right" });
         
         // Draw dot leaders between title and page number
-        const dotsStart = tocTextX + titleWidth + 8;
-        const dotsEnd = pageNumX - pageNumWidth - 8;
-        if (dotsEnd > dotsStart) {
+        const dotsStart = tocTextX + titleWidth + 6;
+        const dotsEnd = pageNumX - pageNumWidth - 6;
+        if (dotsEnd > dotsStart + 10) {
           let dotX = dotsStart;
-          doc.setFontSize(11);
-          const dotSpacing = doc.getTextWidth(". ");
+          const dotSpacing = doc.getTextWidth(". ") * 1.2;
           while (dotX < dotsEnd) {
             doc.text(".", dotX, ty);
             dotX += dotSpacing;
