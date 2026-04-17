@@ -40,6 +40,17 @@
       pageNumY: 546,
     };
 
+    const APP_VERSION = {
+      version: "0.1.3",
+      date: "2026-04-17",
+      changes: [
+        "0.1.3 - Fixed jsPDF CDN version (2.5.1), added error handling, added version badge",
+        "0.1.2 - Switched to Inter font across UI, light theme with GCWB branding",
+        "0.1.1 - Added sample data loader, chapter detection, epigraph parsing",
+        "0.1.0 - Initial prototype with 5x8 formatting spec from print-ready PDF analysis",
+      ]
+    };
+
     function detectChapters(text) {
       const lines = text.split(/\n/);
       const chapters = [];
@@ -416,6 +427,8 @@
       const [rawText, setRawText] = useState("");
       const [chapters, setChapters] = useState([]);
 
+      const [showChangelog, setShowChangelog] = useState(false);
+
       const loadSampleData = function() {
         setBookData({
           title: "Get Big Clients With Tiny Books",
@@ -485,9 +498,18 @@
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <button onClick={loadSampleData} style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
+              <button onClick={function() { setShowChangelog(!showChangelog); }} style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid " + BRAND.border, background: BRAND.light, color: BRAND.textMuted, cursor: "pointer", fontSize: 10, fontFamily: FONT, fontWeight: 600 }}>v{APP_VERSION.version}</button>
               <div style={{ fontSize: 11, color: BRAND.textMuted, fontWeight: 500, fontFamily: FONT }}>bookfunnels.io</div>
             </div>
           </div>
+          {showChangelog && (
+            <div style={{ background: BRAND.white, borderBottom: "1px solid " + BRAND.border, padding: "12px 24px" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.navy, fontFamily: FONT, marginBottom: 6 }}>Version History</div>
+              {APP_VERSION.changes.map(function(change, i) {
+                return <div key={i} style={{ fontSize: 11, color: i === 0 ? BRAND.textPrimary : BRAND.textMuted, fontFamily: FONT, padding: "2px 0" }}>{change}</div>;
+              })}
+            </div>
+          )}
 
           <div style={{ maxWidth: 720, margin: "0 auto", padding: "24px 20px" }}>
             <StepIndicator currentStep={step} steps={steps} />
