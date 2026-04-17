@@ -50,7 +50,10 @@
     const SPEC = {
       pageW: 360, pageH: 576, bodySize: 10, lineHeight: 15, paraGap: 5,
       headerSize: 8, chapterNumSize: 16, chapterTitleSize: 20,
-      epigraphSize: 18, dropCapSize: 35, dropCapLines: 3,
+      epigraphSize: 18, dropCapLines: 3,
+      // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
+      // as a fraction of font size). Gelasio and most serifs sit around 0.72.
+      capHeightRatio: 0.72,
       margins: {
         verso: { inside: 42, outside: 66, top: 24, bottom: 30 },
         recto: { inside: 66, outside: 42, top: 24, bottom: 30 },
@@ -58,10 +61,19 @@
       pageNumY: 546,
     };
 
+    // Drop cap font size is computed so that its cap-height spans exactly dropCapLines
+    // of body text at the current line height. This matches how InDesign's "span N lines"
+    // drop cap feature works.
+    //   cap-height wanted = dropCapLines * lineHeight
+    //   font size needed  = cap-height wanted / capHeightRatio
+    // For 10pt body / 15pt leading / 3 lines / 0.72 ratio ≈ 62.5pt font size
+    const DROP_CAP_SIZE = (SPEC.dropCapLines * SPEC.lineHeight) / SPEC.capHeightRatio;
+
     const APP_VERSION = {
-      version: "0.5.2",
+      version: "0.5.3",
       date: "2026-04-17",
       changes: [
+        "0.5.3 - Drop cap now sized correctly to span 3 full body lines (~62pt font size instead of fixed 35pt). Drop cap's cap-height now fills the exact 3-line block it should occupy, matching InDesign's 'span N lines' behaviour.",
         "0.5.2 - Fixed drop cap vertical alignment. The cap-height top of the drop cap now aligns with the cap-height top of the first body line, as it should typographically.",
         "0.5.1 - Fixed inconsistent line spacing around drop caps. Drop-cap-adjacent lines now share the same baseline rhythm as the rest of the paragraph.",
         "0.5.0 - Fixed font embedding (v0.4.0 used wrong jsDelivr URL path). Fonts now actually embed in the PDF. Cleaner progress UI - single 'Generating your book...' message instead of per-font spam.",
@@ -374,7 +386,7 @@
           const para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
             // Drop cap takes ~3 lines at the narrow width, then continues at full width
-            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize);
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(DROP_CAP_SIZE);
             const dropCapWidth = doc.getTextWidth(para[0].toUpperCase()) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
@@ -565,14 +577,15 @@
             // with the top of the first body line's cap-height. jsPDF positions text by
             // baseline, so we work backwards:
             //   - First body line baseline is at (y + BASELINE_OFFSET)
-            //   - Cap-height for most serif fonts is ~72% of font size above baseline
-            //   - First line cap-top = (y + BASELINE_OFFSET) - (bodySize * 0.72)
-            //   - Drop cap baseline = firstLineCapTop + (dropCapSize * 0.72)
-            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
+            //   - Cap-height for most serif fonts is capHeightRatio * font size above baseline
+            //   - First line cap-top = (y + BASELINE_OFFSET) - (bodySize * capHeightRatio)
+            //   - Drop cap baseline = firstLineCapTop + (DROP_CAP_SIZE * capHeightRatio)
+            // DROP_CAP_SIZE is sized so cap-height exactly spans dropCapLines of body text,
+            // making the drop cap visually occupy the full 3-line block.
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(DROP_CAP_SIZE); doc.setTextColor(30);
             const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
-            const CAP_HEIGHT_RATIO = 0.72;
-            const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * CAP_HEIGHT_RATIO);
-            const dropCapBaseline = firstLineCapTop + (SPEC.dropCapSize * CAP_HEIGHT_RATIO);
+            const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * SPEC.capHeightRatio);
+            const dropCapBaseline = firstLineCapTop + (DROP_CAP_SIZE * SPEC.capHeightRatio);
             doc.text(dropLetter, textX, dropCapBaseline);
 
             // Now render the narrow lines next to the drop cap using the SAME baseline offset
