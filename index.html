@@ -41,9 +41,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.1.4",
+      version: "0.2.0",
       date: "2026-04-17",
       changes: [
+        "0.2.0 - Two-pass rendering for accurate TOC page numbers, dot leaders in TOC, improved chapter layout spacing, en-dash attribution",
         "0.1.4 - Fixed epigraph parsing (handles attribution on same line), fixed drop cap text split",
         "0.1.3 - Fixed jsPDF CDN version (2.5.1), added error handling, added version badge",
         "0.1.2 - Switched to Inter font across UI, light theme with GCWB branding",
@@ -255,47 +256,182 @@
         newPage();
       }
 
+      // ---- TWO-PASS RENDERING ----
+      // Pass 1: Dry run to calculate chapter page numbers (no actual rendering)
+      // Pass 2: Render everything with correct TOC page numbers
+      
+      onProgress("Calculating page layout...");
+      
+      // Helper: calculate how many pages a chapter's body text will take
+      function calcBodyPages(ch, startY) {
+        const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside; // use recto for calc
+        const maxY = SPEC.pageH - 50;
+        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        let y = startY;
+        let pages = 1;
+        let isFirstPara = true;
+
+        for (let pi = 0; pi < paragraphs.length; pi++) {
+          const para = paragraphs[pi];
+          if (isFirstPara && para.length > 0) {
+            // Drop cap takes ~3 lines at the narrow width, then continues at full width
+            doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.dropCapSize);
+            const dropCapWidth = doc.getTextWidth(para[0].toUpperCase()) + 5;
+            doc.setFontSize(SPEC.bodySize);
+            const narrowWidth = textW - dropCapWidth - 5;
+            let remaining = para.slice(1);
+            let lc = 0;
+            while (lc < SPEC.dropCapLines && remaining.length > 0) {
+              const nl = doc.splitTextToSize(remaining, narrowWidth);
+              if (nl.length > 0) { remaining = remaining.slice(nl[0].length).trim(); y += SPEC.lineHeight; lc++; }
+              else break;
+            }
+            if (remaining.length > 0) {
+              const fl = doc.splitTextToSize(remaining, textW);
+              for (const line of fl) {
+                if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
+                y += SPEC.lineHeight;
+              }
+            }
+            isFirstPara = false; y += SPEC.paraGap; continue;
+          }
+          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.bodySize);
+          const lines = doc.splitTextToSize(para, textW);
+          for (const line of lines) {
+            if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
+            y += SPEC.lineHeight;
+          }
+          y += SPEC.paraGap;
+        }
+        return pages;
+      }
+
+      // Calculate chapter opening Y position
+      function calcOpeningHeight(ch) {
+        let y = 55;
+        if (ch.num) y += 45;
+        // Title
+        doc.setFont("helvetica", "bold"); doc.setFontSize(SPEC.chapterTitleSize);
+        const titleWrapped = doc.splitTextToSize(ch.title, 252);
+        y += titleWrapped.length * 28 + 35;
+        // Epigraph
+        if (ch.epigraph) {
+          doc.setFont("helvetica", "italic"); doc.setFontSize(14);
+          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", 192);
+          y += epLines.length * 20;
+          if (ch.epigraphAttribution) y += 20;
+          y += 30;
+        } else { y += 25; }
+        return y;
+      }
+
+      // PASS 1: Calculate page numbers
+      const chapterPageNumbers = [];
+      let currentArabicPage = 1;
+      
+      for (let ci = 0; ci < chapters.length; ci++) {
+        const ch = chapters[ci];
+        // Chapters start on odd pages
+        if (currentArabicPage % 2 === 0) currentArabicPage++;
+        chapterPageNumbers.push(currentArabicPage);
+        
+        const openingY = calcOpeningHeight(ch);
+        const bodyPages = calcBodyPages(ch, openingY);
+        currentArabicPage += bodyPages;
+      }
+
+      // ---- PASS 2: RENDER TOC WITH CORRECT PAGE NUMBERS ----
       onProgress("Building table of contents...");
-      const tocPageStart = pageNum + 1;
       newPage(); ty = 60;
       doc.setFont("helvetica", "bold"); doc.setFontSize(22); doc.setTextColor(30);
       doc.text("Contents", SPEC.pageW / 2, ty, { align: "center" }); ty += 50;
-      doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+
+      const tocTextX = getTextX();
+      const tocTextW = getTextWidth();
+
       for (let i = 0; i < chapters.length; i++) {
-        doc.text(chapters[i].title || chapters[i].num, getTextX(), ty); ty += 30;
+        const ch = chapters[i];
+        const displayTitle = ch.num ? (ch.num + ": " + ch.title) : ch.title;
+        const pageNumStr = String(chapterPageNumbers[i]);
+
+        doc.setFont("helvetica", "normal"); doc.setFontSize(11); doc.setTextColor(30);
+        
+        // Draw title
+        doc.text(displayTitle, tocTextX, ty);
+        const titleWidth = doc.getTextWidth(displayTitle);
+        
+        // Draw page number right-aligned
+        const pageNumWidth = doc.getTextWidth(pageNumStr);
+        const pageNumX = tocTextX + tocTextW;
+        doc.text(pageNumStr, pageNumX, ty, { align: "right" });
+        
+        // Draw dot leaders between title and page number
+        const dotsStart = tocTextX + titleWidth + 8;
+        const dotsEnd = pageNumX - pageNumWidth - 8;
+        if (dotsEnd > dotsStart) {
+          let dotX = dotsStart;
+          doc.setFontSize(11);
+          const dotSpacing = doc.getTextWidth(". ");
+          while (dotX < dotsEnd) {
+            doc.text(".", dotX, ty);
+            dotX += dotSpacing;
+          }
+        }
+        
+        ty += 30;
         if (ty > SPEC.pageH - 80) { newPage(); ty = 60; }
       }
-      newPage();
+      newPage(); // blank after TOC
 
+      // ---- PASS 2: RENDER CHAPTERS ----
       for (let ci = 0; ci < chapters.length; ci++) {
         const ch = chapters[ci];
         onProgress("Formatting chapter " + (ci + 1) + " of " + chapters.length + "...");
+        
+        // Chapters start on recto (odd) pages
         if (!isRecto()) newPage();
         newPage();
-        bookPageNum = pageNum - tocPageStart - 1;
-        const textW = getTextWidth(); const textX = getTextX();
+        
+        bookPageNum = chapterPageNumbers[ci];
+        const textW = getTextWidth();
+        const textX = getTextX();
         let y = 55;
 
+        // Chapter number label
         if (ch.num) {
           doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
-          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" }); y += 50;
+          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" }); 
+          y += 45;
         }
+
+        // Chapter title
         doc.setFont("helvetica", "bold"); doc.setFontSize(SPEC.chapterTitleSize);
         const titleWrapped = wrapText(ch.title, textW, SPEC.chapterTitleSize, "bold");
         for (const line of titleWrapped) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 28; }
-        y += 30;
+        y += 35;
 
+        // Epigraph
         if (ch.epigraph) {
           doc.setFont("helvetica", "italic"); doc.setFontSize(14);
-          const epLines = wrapText("\u201C" + ch.epigraph + "\u201D", textW - 40, 14, "italic");
+          const epText = "\u201C" + ch.epigraph + "\u201D";
+          const epLines = wrapText(epText, textW - 60, 14, "italic");
           for (const line of epLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 20; }
-          if (ch.epigraphAttribution) { y += 5; doc.setFontSize(12); doc.text("- " + ch.epigraphAttribution, SPEC.pageW / 2, y, { align: "center" }); y += 15; }
-          y += 20;
-        } else { y += 30; }
+          if (ch.epigraphAttribution) { 
+            y += 5; 
+            doc.setFontSize(12); 
+            doc.text("\u2013 " + ch.epigraphAttribution, SPEC.pageW / 2, y, { align: "center" }); 
+            y += 15; 
+          }
+          y += 30;
+        } else { 
+          y += 25; 
+        }
 
+        // Body text with drop cap on first paragraph
         const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
         let isFirstPara = true;
         const maxY = SPEC.pageH - 50;
+        let pagesUsed = 0;
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
@@ -320,7 +456,7 @@
             if (remainingText.length > 0) {
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
               for (const line of fullLines) {
-                if (y > maxY) { newPage(); bookPageNum++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum); y = getMargins().top + 30; }
+                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
                 doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
               }
             }
@@ -329,7 +465,7 @@
           doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
           const lines = wrapText(para, textW, SPEC.bodySize);
           for (const line of lines) {
-            if (y > maxY) { newPage(); bookPageNum++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum); y = getMargins().top + 30; }
+            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
             doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
           }
           y += SPEC.paraGap;
