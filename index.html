@@ -59,9 +59,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.1",
+      version: "0.5.2",
       date: "2026-04-17",
       changes: [
+        "0.5.2 - Fixed drop cap vertical alignment. The cap-height top of the drop cap now aligns with the cap-height top of the first body line, as it should typographically.",
         "0.5.1 - Fixed inconsistent line spacing around drop caps. Drop-cap-adjacent lines now share the same baseline rhythm as the rest of the paragraph.",
         "0.5.0 - Fixed font embedding (v0.4.0 used wrong jsDelivr URL path). Fonts now actually embed in the PDF. Cleaner progress UI - single 'Generating your book...' message instead of per-font spam.",
         "0.4.0 - UI refreshed to match Bookfunnels Mockup tool. Font loading reworked (but URL pattern still broken - fixed in 0.5.0).",
@@ -559,13 +560,19 @@
             const dropLetter = para[0].toUpperCase();
             const restText = para.slice(1);
 
-            // Drop cap: measure its width at dropCapSize, then position it so the top of the
-            // cap height aligns with the top of the first body line.
+            // Drop cap positioning:
+            // Typographic rule is that the top of the drop cap's cap-height should sit flush
+            // with the top of the first body line's cap-height. jsPDF positions text by
+            // baseline, so we work backwards:
+            //   - First body line baseline is at (y + BASELINE_OFFSET)
+            //   - Cap-height for most serif fonts is ~72% of font size above baseline
+            //   - First line cap-top = (y + BASELINE_OFFSET) - (bodySize * 0.72)
+            //   - Drop cap baseline = firstLineCapTop + (dropCapSize * 0.72)
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
             const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
-            // Baseline for drop cap: it spans dropCapLines (3) lines tall, so baseline sits
-            // roughly at y + (dropCapLines * lineHeight) - a small descender allowance.
-            const dropCapBaseline = y + (SPEC.dropCapLines * SPEC.lineHeight) - 3;
+            const CAP_HEIGHT_RATIO = 0.72;
+            const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * CAP_HEIGHT_RATIO);
+            const dropCapBaseline = firstLineCapTop + (SPEC.dropCapSize * CAP_HEIGHT_RATIO);
             doc.text(dropLetter, textX, dropCapBaseline);
 
             // Now render the narrow lines next to the drop cap using the SAME baseline offset
