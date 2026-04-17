@@ -59,9 +59,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.0",
+      version: "0.5.1",
       date: "2026-04-17",
       changes: [
+        "0.5.1 - Fixed inconsistent line spacing around drop caps. Drop-cap-adjacent lines now share the same baseline rhythm as the rest of the paragraph.",
         "0.5.0 - Fixed font embedding (v0.4.0 used wrong jsDelivr URL path). Fonts now actually embed in the PDF. Cleaner progress UI - single 'Generating your book...' message instead of per-font spam.",
         "0.4.0 - UI refreshed to match Bookfunnels Mockup tool. Font loading reworked (but URL pattern still broken - fixed in 0.5.0).",
         "0.3.0 - Font embedding: Gelasio (body/titles), EB Garamond (epigraphs/dedication), Inter (headers/page numbers) loaded from Google Fonts and embedded in PDF",
@@ -546,14 +547,29 @@
         const maxY = SPEC.pageH - 50;
         let pagesUsed = 0;
 
+        // Consistent baseline offset for all body text lines.
+        // A line advances y by SPEC.lineHeight (15pt). The baseline of the glyph within that
+        // slot sits at a fixed offset from the top. Using bodySize * 0.8 throughout matches
+        // how non-drop-cap chapters render and keeps rhythm consistent.
+        const BASELINE_OFFSET = SPEC.bodySize * 0.8;
+
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
             const dropLetter = para[0].toUpperCase();
             const restText = para.slice(1);
+
+            // Drop cap: measure its width at dropCapSize, then position it so the top of the
+            // cap height aligns with the top of the first body line.
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
             const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
-            doc.text(dropLetter, textX, y + SPEC.dropCapSize * 0.75);
+            // Baseline for drop cap: it spans dropCapLines (3) lines tall, so baseline sits
+            // roughly at y + (dropCapLines * lineHeight) - a small descender allowance.
+            const dropCapBaseline = y + (SPEC.dropCapLines * SPEC.lineHeight) - 3;
+            doc.text(dropLetter, textX, dropCapBaseline);
+
+            // Now render the narrow lines next to the drop cap using the SAME baseline offset
+            // as all other body lines so vertical rhythm is preserved.
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
             let remainingText = restText;
@@ -561,7 +577,7 @@
             while (lineCount < SPEC.dropCapLines && remainingText.length > 0) {
               const narrowLines = wrapText(remainingText, narrowWidth, SPEC.bodySize);
               if (narrowLines.length > 0) {
-                doc.text(narrowLines[0], textX + dropCapWidth, y + SPEC.lineHeight * 0.8);
+                doc.text(narrowLines[0], textX + dropCapWidth, y + BASELINE_OFFSET);
                 remainingText = remainingText.slice(narrowLines[0].length).trim();
                 y += SPEC.lineHeight; lineCount++;
               } else break;
@@ -570,7 +586,7 @@
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
               for (const line of fullLines) {
                 if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
-                doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
+                doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
               }
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
@@ -579,7 +595,7 @@
           const lines = wrapText(para, textW, SPEC.bodySize);
           for (const line of lines) {
             if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
-            doc.text(line, textX, y + SPEC.bodySize * 0.8); y += SPEC.lineHeight;
+            doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
           }
           y += SPEC.paraGap;
         }
