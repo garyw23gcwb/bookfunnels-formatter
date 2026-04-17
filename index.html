@@ -59,10 +59,11 @@
     };
 
     const APP_VERSION = {
-      version: "0.4.0",
+      version: "0.5.0",
       date: "2026-04-17",
       changes: [
-        "0.4.0 - Font embedding now works via jsDelivr fontsource TTF URLs (replaces broken CSS parser). UI refreshed to match Bookfunnels Mockup tool.",
+        "0.5.0 - Fixed font embedding (v0.4.0 used wrong jsDelivr URL path). Fonts now actually embed in the PDF. Cleaner progress UI - single 'Generating your book...' message instead of per-font spam.",
+        "0.4.0 - UI refreshed to match Bookfunnels Mockup tool. Font loading reworked (but URL pattern still broken - fixed in 0.5.0).",
         "0.3.0 - Font embedding: Gelasio (body/titles), EB Garamond (epigraphs/dedication), Inter (headers/page numbers) loaded from Google Fonts and embedded in PDF",
         "0.2.2 - Expanded sample data with 4 test cases (epigraph/no epigraph/named section)",
         "0.2.1 - Fixed TOC dot leaders for long titles, TOC shows chapter titles without prefix",
@@ -172,42 +173,49 @@
     }
 
     // Font loading utility
-    // Uses jsDelivr's fontsource CDN which serves TTF files directly with CORS headers.
-    // This avoids the Google Fonts CSS-parsing approach which is unreliable (WOFF2 by default,
-    // @font-face parsing fragile, User-Agent header forbidden in browser fetch).
-    async function loadFontsForPDF(doc, onProgress) {
-      onProgress("Loading fonts...");
+    // Uses Fontsource's partnered jsDelivr CDN. URL pattern:
+    //   https://cdn.jsdelivr.net/fontsource/fonts/{font}@{version}/{subset}-{weight}-{style}.ttf
+    // We explicitly request TTF (not the default woff2) because jsPDF needs TTF for VFS embedding.
+    async function loadFontsForPDF(doc) {
+      const CDN = "https://cdn.jsdelivr.net/fontsource/fonts";
+      const VERSION = "5"; // pin to v5 for stable cache; "latest" also works
 
-      // Direct TTF URLs from @fontsource on jsDelivr
-      const FONTSOURCE = "https://cdn.jsdelivr.net/npm/@fontsource";
       const fonts = [
-        { family: "Gelasio", pkg: "gelasio", style: "normal", weight: "400", jsPDFStyle: "normal" },
-        { family: "Gelasio", pkg: "gelasio", style: "normal", weight: "700", jsPDFStyle: "bold" },
-        { family: "Gelasio", pkg: "gelasio", style: "italic", weight: "400", jsPDFStyle: "italic" },
-        { family: "EB Garamond", pkg: "eb-garamond", style: "italic", weight: "400", jsPDFStyle: "italic" },
-        { family: "Inter", pkg: "inter", style: "normal", weight: "400", jsPDFStyle: "normal" },
+        { family: "Gelasio", slug: "gelasio", weight: "400", style: "normal", jsPDFStyle: "normal" },
+        { family: "Gelasio", slug: "gelasio", weight: "700", style: "normal", jsPDFStyle: "bold" },
+        { family: "Gelasio", slug: "gelasio", weight: "400", style: "italic", jsPDFStyle: "italic" },
+        { family: "EB Garamond", slug: "eb-garamond", weight: "400", style: "italic", jsPDFStyle: "italic" },
+        { family: "Inter", slug: "inter", weight: "400", style: "normal", jsPDFStyle: "normal" },
       ];
 
       let loadedCount = 0;
 
       for (const font of fonts) {
         try {
-          // fontsource file naming: {pkg}-latin-{weight}-{style}.ttf
-          const fileName = font.pkg + "-latin-" + font.weight + "-" + font.style + ".ttf";
-          const url = FONTSOURCE + "/" + font.pkg + "@latest/files/" + fileName;
-
-          onProgress("Loading " + font.family + " " + font.jsPDFStyle + "...");
-
+          const url = CDN + "/" + font.slug + "@" + VERSION + "/latin-" + font.weight + "-" + font.style + ".ttf";
           const response = await fetch(url);
+
           if (!response.ok) {
-            console.warn("Font fetch failed (" + response.status + "): " + url);
+            console.warn("Font fetch failed (HTTP " + response.status + "): " + url);
             continue;
           }
 
+          // Validate we got a real TTF (starts with 0x00 0x01 0x00 0x00 or 'OTTO' for OTF)
           const buffer = await response.arrayBuffer();
           const binary = new Uint8Array(buffer);
+          if (binary.length < 4) {
+            console.warn("Font file too small: " + url);
+            continue;
+          }
+          const header = binary[0] + "-" + binary[1] + "-" + binary[2] + "-" + binary[3];
+          const validTTF = (binary[0] === 0x00 && binary[1] === 0x01 && binary[2] === 0x00 && binary[3] === 0x00);
+          const validOTF = (binary[0] === 0x4F && binary[1] === 0x54 && binary[2] === 0x54 && binary[3] === 0x4F);
+          if (!validTTF && !validOTF) {
+            console.warn("Font file not a valid TTF/OTF (header " + header + "): " + url);
+            continue;
+          }
 
-          // Convert to binary string for jsPDF's VFS (chunk to avoid stack overflow on big files)
+          // Convert to binary string for jsPDF's VFS (chunk to avoid stack overflow)
           let binaryStr = "";
           const CHUNK = 0x8000;
           for (let i = 0; i < binary.length; i += CHUNK) {
@@ -223,12 +231,12 @@
         }
       }
 
-      onProgress(loadedCount + " font variant" + (loadedCount === 1 ? "" : "s") + " embedded");
+      console.log("Font embedding: " + loadedCount + "/" + fonts.length + " variants loaded");
       return loadedCount > 0;
     }
 
     async function generatePDF(bookData, chapters, onProgress) {
-      onProgress("Loading PDF library...");
+      onProgress("Preparing your book...");
       
       if (!window.jspdf || !window.jspdf.jsPDF) {
         throw new Error("jsPDF library not loaded. Please refresh the page and try again.");
@@ -237,8 +245,8 @@
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
       
-      // Try to load custom fonts
-      const fontsLoaded = await loadFontsForPDF(doc, onProgress).catch(function(e) {
+      // Try to load custom fonts (silent - single progress message already showing)
+      const fontsLoaded = await loadFontsForPDF(doc).catch(function(e) {
         console.warn("Font loading failed, falling back to helvetica:", e);
         return false;
       });
