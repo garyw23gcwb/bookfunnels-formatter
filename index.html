@@ -12,7 +12,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-    input:focus, textarea:focus { border-color: #20BDD4 !important; outline: none; }
+    input:focus, textarea:focus { border-color: #A8B5FF !important; outline: none; }
   </style>
 </head>
 <body>
@@ -20,11 +20,29 @@
   <script type="text/babel">
     const { useState } = React;
 
+    // Palette matched to the Bookfunnels Mockup tool for visual consistency
     const BRAND = {
-      navy: "#1A212C", deepTeal: "#1C4057", teal: "#20BDD4", blue: "#3D87CC",
-      light: "#EFF6FB", white: "#FFFFFF", textPrimary: "#1A212C",
-      textSecondary: "#4A5568", textMuted: "#94A3B8", border: "#E2E8F0",
-      borderLight: "#F1F5F9", bgSubtle: "#F8FAFC", success: "#10B981", danger: "#EF4444",
+      navy: "#1A212C",
+      deepTeal: "#1C4057",
+      teal: "#20BDD4",
+      blue: "#3D87CC",
+      accent: "#A8B5FF",          // soft lavender-blue button fill (Mockup tool primary button)
+      accentHover: "#8B9BFF",
+      accentDeep: "#4F5FD9",
+      light: "#EFF6FB",
+      bgPage: "#F5F7FA",          // page background behind cards
+      bgSubtle: "#F5F7FA",
+      white: "#FFFFFF",
+      textPrimary: "#1A212C",
+      textSecondary: "#5A6478",
+      textMuted: "#94A3B8",
+      label: "#6B7484",            // uppercase section labels
+      border: "#E8EBF0",
+      borderLight: "#F1F5F9",
+      stepBadgeBg: "#EEF1FF",      // light blue rounded square
+      stepBadgeText: "#3D87CC",
+      success: "#10B981",
+      danger: "#EF4444",
     };
 
     const FONT = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
@@ -41,9 +59,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.3.0",
+      version: "0.4.0",
       date: "2026-04-17",
       changes: [
+        "0.4.0 - Font embedding now works via jsDelivr fontsource TTF URLs (replaces broken CSS parser). UI refreshed to match Bookfunnels Mockup tool.",
         "0.3.0 - Font embedding: Gelasio (body/titles), EB Garamond (epigraphs/dedication), Inter (headers/page numbers) loaded from Google Fonts and embedded in PDF",
         "0.2.2 - Expanded sample data with 4 test cases (epigraph/no epigraph/named section)",
         "0.2.1 - Fixed TOC dot leaders for long titles, TOC shows chapter titles without prefix",
@@ -153,59 +172,59 @@
     }
 
     // Font loading utility
+    // Uses jsDelivr's fontsource CDN which serves TTF files directly with CORS headers.
+    // This avoids the Google Fonts CSS-parsing approach which is unreliable (WOFF2 by default,
+    // @font-face parsing fragile, User-Agent header forbidden in browser fetch).
     async function loadFontsForPDF(doc, onProgress) {
       onProgress("Loading fonts...");
-      
-      // Google Fonts CSS API returns TTF URLs when requested with an older user-agent
-      const fontCSS = await fetch(
-        "https://fonts.googleapis.com/css2?family=Gelasio:ital,wght@0,400;0,700;1,400&family=EB+Garamond:ital@1&family=Inter:wght@400&display=swap",
-        { headers: { "User-Agent": "Mozilla/4.0" } }
-      ).then(function(r) { return r.text(); });
-      
-      // Parse TTF URLs from the CSS
-      const urlMatches = fontCSS.matchAll(/font-family:\s*'([^']+)'[\s\S]*?font-style:\s*(\w+)[\s\S]*?font-weight:\s*(\d+)[\s\S]*?url\((https:\/\/fonts\.gstatic\.com\/[^)]+\.ttf)\)/g);
-      
-      const fontMap = {};
-      for (const match of urlMatches) {
-        const family = match[1];
-        const style = match[2];
-        const weight = match[3];
-        const url = match[4];
-        const key = family + "-" + style + "-" + weight;
-        fontMap[key] = { family: family, style: style, weight: weight, url: url };
-      }
-      
-      // Fetch each font file and register with jsPDF
-      for (const key in fontMap) {
-        const font = fontMap[key];
+
+      // Direct TTF URLs from @fontsource on jsDelivr
+      const FONTSOURCE = "https://cdn.jsdelivr.net/npm/@fontsource";
+      const fonts = [
+        { family: "Gelasio", pkg: "gelasio", style: "normal", weight: "400", jsPDFStyle: "normal" },
+        { family: "Gelasio", pkg: "gelasio", style: "normal", weight: "700", jsPDFStyle: "bold" },
+        { family: "Gelasio", pkg: "gelasio", style: "italic", weight: "400", jsPDFStyle: "italic" },
+        { family: "EB Garamond", pkg: "eb-garamond", style: "italic", weight: "400", jsPDFStyle: "italic" },
+        { family: "Inter", pkg: "inter", style: "normal", weight: "400", jsPDFStyle: "normal" },
+      ];
+
+      let loadedCount = 0;
+
+      for (const font of fonts) {
         try {
-          const response = await fetch(font.url);
+          // fontsource file naming: {pkg}-latin-{weight}-{style}.ttf
+          const fileName = font.pkg + "-latin-" + font.weight + "-" + font.style + ".ttf";
+          const url = FONTSOURCE + "/" + font.pkg + "@latest/files/" + fileName;
+
+          onProgress("Loading " + font.family + " " + font.jsPDFStyle + "...");
+
+          const response = await fetch(url);
+          if (!response.ok) {
+            console.warn("Font fetch failed (" + response.status + "): " + url);
+            continue;
+          }
+
           const buffer = await response.arrayBuffer();
           const binary = new Uint8Array(buffer);
-          
-          // Convert to binary string for jsPDF
+
+          // Convert to binary string for jsPDF's VFS (chunk to avoid stack overflow on big files)
           let binaryStr = "";
-          for (let i = 0; i < binary.length; i++) {
-            binaryStr += String.fromCharCode(binary[i]);
+          const CHUNK = 0x8000;
+          for (let i = 0; i < binary.length; i += CHUNK) {
+            binaryStr += String.fromCharCode.apply(null, binary.subarray(i, i + CHUNK));
           }
-          
-          // Determine jsPDF font style
-          let jsPDFStyle = "normal";
-          if (font.style === "italic" && font.weight === "700") jsPDFStyle = "bolditalic";
-          else if (font.style === "italic") jsPDFStyle = "italic";
-          else if (font.weight === "700") jsPDFStyle = "bold";
-          
-          const fileName = font.family.replace(/\s+/g, "") + "-" + jsPDFStyle + ".ttf";
-          doc.addFileToVFS(fileName, binaryStr);
-          doc.addFont(fileName, font.family, jsPDFStyle);
-          
-          onProgress("Loaded " + font.family + " " + jsPDFStyle + "...");
+
+          const vfsName = font.family.replace(/\s+/g, "") + "-" + font.jsPDFStyle + ".ttf";
+          doc.addFileToVFS(vfsName, binaryStr);
+          doc.addFont(vfsName, font.family, font.jsPDFStyle);
+          loadedCount++;
         } catch (e) {
-          console.warn("Failed to load font: " + key, e);
+          console.warn("Failed to load font " + font.family + " " + font.jsPDFStyle + ":", e);
         }
       }
-      
-      return Object.keys(fontMap).length > 0;
+
+      onProgress(loadedCount + " font variant" + (loadedCount === 1 ? "" : "s") + " embedded");
+      return loadedCount > 0;
     }
 
     async function generatePDF(bookData, chapters, onProgress) {
@@ -566,14 +585,28 @@
 
     function StepIndicator({ currentStep, steps }) {
       return (
-        <div style={{ display: "flex", gap: 4, marginBottom: 32 }}>
+        <div style={{ display: "flex", gap: 4, marginBottom: 28 }}>
           {steps.map((s, i) => (
             <div key={i} style={{ flex: 1 }}>
-              <div style={{ height: 3, borderRadius: 2, background: i <= currentStep ? BRAND.teal : BRAND.border, transition: "background 0.3s" }} />
-              <div style={{ fontSize: 11, fontFamily: FONT, color: i <= currentStep ? BRAND.textPrimary : BRAND.textMuted, marginTop: 6, fontWeight: i === currentStep ? 600 : 400 }}>{s}</div>
+              <div style={{ height: 3, borderRadius: 2, background: i <= currentStep ? BRAND.accent : BRAND.border, transition: "background 0.3s" }} />
+              <div style={{ fontSize: 11, fontFamily: FONT, color: i <= currentStep ? BRAND.textPrimary : BRAND.textMuted, marginTop: 8, fontWeight: i === currentStep ? 600 : 500, letterSpacing: "0.02em" }}>{s}</div>
             </div>
           ))}
         </div>
+      );
+    }
+
+    // Numbered step badge (blue number on soft blue background), matching Mockup tool
+    function StepBadge({ num }) {
+      return (
+        <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 8, background: BRAND.stepBadgeBg, color: BRAND.stepBadgeText, fontSize: 13, fontWeight: 700, fontFamily: FONT, marginRight: 10, verticalAlign: "middle" }}>{num}</div>
+      );
+    }
+
+    // Small uppercase section label
+    function SectionLabel({ children }) {
+      return (
+        <div style={{ fontSize: 11, fontFamily: FONT, color: BRAND.label, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>{children}</div>
       );
     }
 
@@ -601,10 +634,10 @@
 
     function Button({ children, onClick, variant, disabled, style: extraStyle }) {
       variant = variant || "primary";
-      const base = { padding: "10px 20px", borderRadius: 8, border: "none", fontSize: 14, fontFamily: FONT, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", transition: "all 0.2s", opacity: disabled ? 0.5 : 1 };
+      const base = { padding: "11px 24px", borderRadius: 10, border: "none", fontSize: 14, fontFamily: FONT, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", transition: "all 0.2s", opacity: disabled ? 0.5 : 1, display: "inline-flex", alignItems: "center", gap: 6 };
       const variants = {
-        primary: { background: BRAND.teal, color: BRAND.white },
-        secondary: { background: "transparent", color: BRAND.textPrimary, border: "1px solid " + BRAND.border },
+        primary: { background: BRAND.accent, color: BRAND.white },
+        secondary: { background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border },
       };
       return <button onClick={disabled ? undefined : onClick} style={Object.assign({}, base, variants[variant], extraStyle)}>{children}</button>;
     }
@@ -616,7 +649,7 @@
         <div style={{ background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, padding: 16, marginBottom: 8 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 28, height: 28, borderRadius: 6, background: BRAND.light, color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, fontFamily: FONT }}>{index + 1}</div>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: BRAND.stepBadgeBg, color: BRAND.stepBadgeText, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, fontFamily: FONT }}>{index + 1}</div>
               <div>
                 <div style={{ fontWeight: 600, fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary }}>
                   {chapter.num && <span style={{ color: BRAND.textMuted, fontWeight: 400 }}>{chapter.num} &middot; </span>}
@@ -626,7 +659,7 @@
               </div>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              <button onClick={function() { setExpanded(!expanded); }} style={{ background: "none", border: "none", color: BRAND.blue, cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px" }}>{expanded ? "Collapse" : "Edit"}</button>
+              <button onClick={function() { setExpanded(!expanded); }} style={{ background: "none", border: "none", color: BRAND.accentDeep, cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px", fontWeight: 600 }}>{expanded ? "Collapse" : "Edit"}</button>
               <button onClick={function() { onRemove(chapter.id); }} style={{ background: "none", border: "none", color: BRAND.danger + "88", cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px" }}>Remove</button>
             </div>
           </div>
@@ -735,38 +768,41 @@
       const totalWords = chapters.reduce(function(sum, ch) { return sum + ch.body.split(/\s+/).filter(Boolean).length; }, 0);
 
       return (
-        <div style={{ minHeight: "100vh", background: BRAND.bgSubtle, color: BRAND.textPrimary, fontFamily: FONT }}>
-          {/* Header */}
-          <div style={{ background: BRAND.white, borderBottom: "1px solid " + BRAND.border, padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, " + BRAND.blue + ", " + BRAND.teal + ")", display: "flex", alignItems: "center", justifyContent: "center", color: BRAND.white, fontSize: 14, fontWeight: 700, fontFamily: FONT }}>Tb</div>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 15, color: BRAND.navy, fontFamily: FONT }}>Tinybook Formatter</div>
-                <div style={{ fontSize: 11, color: BRAND.textMuted, fontFamily: FONT }}>5&times;8 Print-Ready Interior</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <button onClick={loadSampleData} style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
-              <button onClick={function() { setShowChangelog(!showChangelog); }} style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid " + BRAND.border, background: BRAND.light, color: BRAND.textMuted, cursor: "pointer", fontSize: 10, fontFamily: FONT, fontWeight: 600 }}>v{APP_VERSION.version}</button>
-              <div style={{ fontSize: 11, color: BRAND.textMuted, fontWeight: 500, fontFamily: FONT }}>bookfunnels.io</div>
-            </div>
+        <div style={{ minHeight: "100vh", background: BRAND.bgPage, color: BRAND.textPrimary, fontFamily: FONT }}>
+          {/* Top utility bar - version + sample data */}
+          <div style={{ position: "absolute", top: 16, right: 20, display: "flex", alignItems: "center", gap: 10, zIndex: 10 }}>
+            <button onClick={loadSampleData} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
+            <button onClick={function() { setShowChangelog(!showChangelog); }} style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textMuted, cursor: "pointer", fontSize: 10, fontFamily: FONT, fontWeight: 600 }}>v{APP_VERSION.version}</button>
           </div>
+
           {showChangelog && (
-            <div style={{ background: BRAND.white, borderBottom: "1px solid " + BRAND.border, padding: "12px 24px" }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.navy, fontFamily: FONT, marginBottom: 6 }}>Version History</div>
+            <div style={{ position: "absolute", top: 52, right: 20, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, padding: "14px 18px", boxShadow: "0 8px 24px rgba(26,33,44,0.08)", maxWidth: 420, zIndex: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: BRAND.navy, fontFamily: FONT, marginBottom: 8, letterSpacing: "0.05em", textTransform: "uppercase" }}>Version History</div>
               {APP_VERSION.changes.map(function(change, i) {
-                return <div key={i} style={{ fontSize: 11, color: i === 0 ? BRAND.textPrimary : BRAND.textMuted, fontFamily: FONT, padding: "2px 0" }}>{change}</div>;
+                return <div key={i} style={{ fontSize: 11, color: i === 0 ? BRAND.textPrimary : BRAND.textMuted, fontFamily: FONT, padding: "3px 0", lineHeight: 1.5 }}>{change}</div>;
               })}
             </div>
           )}
 
-          <div style={{ maxWidth: 720, margin: "0 auto", padding: "24px 20px" }}>
-            <StepIndicator currentStep={step} steps={steps} />
+          {/* Hero header */}
+          <div style={{ padding: "56px 20px 32px", textAlign: "center" }}>
+            <h1 style={{ fontSize: 38, fontWeight: 800, color: BRAND.navy, fontFamily: FONT, letterSpacing: "-0.02em", marginBottom: 12 }}>Tinybook Formatter</h1>
+            <p style={{ fontSize: 15, color: BRAND.textSecondary, fontFamily: FONT, maxWidth: 560, margin: "0 auto", lineHeight: 1.5 }}>
+              Turn your manuscript into a print-ready 5" &times; 8" interior PDF with professional typography, drop caps, and table of contents.
+            </p>
+          </div>
+
+          <div style={{ maxWidth: 760, margin: "0 auto", padding: "0 20px 60px" }}>
+            <div style={{ background: BRAND.white, borderRadius: 16, border: "1px solid " + BRAND.border, boxShadow: "0 4px 16px rgba(26,33,44,0.04)", padding: "32px 32px 28px" }}>
+              <StepIndicator currentStep={step} steps={steps} />
 
             {step === 0 && (
               <div>
-                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Book Details</h2>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Enter your book information. These details appear on the title page, copyright page, and running headers.</p>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+                  <StepBadge num="1" />
+                  <SectionLabel>Book Details</SectionLabel>
+                </div>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Enter your book information. These details appear on the title page, copyright page, and running headers.</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <Input label="Book Title *" value={bookData.title} onChange={function(v) { updateBook("title", v); }} placeholder="Get Big Clients With Tiny Books" />
                   <Input label="Author Name *" value={bookData.author} onChange={function(v) { updateBook("author", v); }} placeholder="Gary White" />
@@ -791,8 +827,11 @@
 
             {step === 1 && (
               <div>
-                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Manuscript</h2>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Paste your manuscript text or upload a .txt file. The formatter will automatically detect chapters.</p>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+                  <StepBadge num="2" />
+                  <SectionLabel>Manuscript</SectionLabel>
+                </div>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt file. The formatter will automatically detect chapters.</p>
                 <label style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid " + BRAND.border, cursor: "pointer", fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary, background: BRAND.white, display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
                   Upload .txt File
                   <input type="file" accept=".txt,.md" onChange={handleFileUpload} style={{ display: "none" }} />
@@ -809,7 +848,10 @@
 
             {step === 2 && (
               <div>
-                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Chapters</h2>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+                  <StepBadge num="3" />
+                  <SectionLabel>Chapters</SectionLabel>
+                </div>
                 <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 8, fontFamily: FONT }}>{chapters.length} chapters detected &middot; {totalWords.toLocaleString()} total words</p>
                 <p style={{ color: BRAND.textMuted, fontSize: 12, marginBottom: 20, fontFamily: FONT }}>Click "Edit" on any chapter to adjust titles, epigraphs, or body text.</p>
                 {chapters.map(function(ch, i) { return <ChapterCard key={ch.id} chapter={ch} index={i} onEdit={handleEditChapter} onRemove={handleRemoveChapter} />; })}
@@ -823,8 +865,11 @@
 
             {step === 3 && (
               <div>
-                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Preview & Generate</h2>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT }}>Review your book details before generating the print-ready PDF.</p>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+                  <StepBadge num="4" />
+                  <SectionLabel>Preview & Generate</SectionLabel>
+                </div>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Review your book details before generating the print-ready PDF.</p>
                 <div style={{ display: "flex", gap: 24, marginBottom: 24 }}>
                   <PagePreview bookData={bookData} chapters={chapters} />
                   <div style={{ flex: 1 }}>
@@ -842,8 +887,8 @@
                   </div>
                 </div>
                 {generating && (
-                  <div style={{ padding: 16, background: BRAND.light, border: "1px solid " + BRAND.teal + "33", borderRadius: 10, marginBottom: 16, textAlign: "center" }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, fontFamily: FONT, color: BRAND.deepTeal }}>{progress}</div>
+                  <div style={{ padding: 16, background: BRAND.stepBadgeBg, border: "1px solid " + BRAND.accent + "44", borderRadius: 10, marginBottom: 16, textAlign: "center" }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, fontFamily: FONT, color: BRAND.accentDeep }}>{progress}</div>
                   </div>
                 )}
                 {error && (
@@ -864,7 +909,7 @@
                 <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Your Tinybook is Ready</h2>
                 <p style={{ color: BRAND.textSecondary, fontSize: 14, marginBottom: 32, fontFamily: FONT }}>{bookData.title} &middot; {chapters.length} chapters &middot; {totalWords.toLocaleString()} words</p>
                 <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-                  <a href={pdfUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Interior.pdf"} style={{ padding: "12px 28px", borderRadius: 8, background: BRAND.teal, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}>&darr; Download PDF</a>
+                  <a href={pdfUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Interior.pdf"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accent, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}>&darr; Download PDF</a>
                   <Button variant="secondary" onClick={function() { setPdfUrl(null); setStep(3); }}>Back to Preview</Button>
                 </div>
                 <div style={{ marginTop: 40, padding: 16, background: BRAND.white, borderRadius: 10, border: "1px solid " + BRAND.border, textAlign: "left", maxWidth: 480, margin: "40px auto 0" }}>
@@ -879,6 +924,15 @@
                 </div>
               </div>
             )}
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div style={{ borderTop: "1px solid " + BRAND.border, padding: "20px 20px 28px", textAlign: "center" }}>
+            <div style={{ width: 36, height: 3, background: BRAND.border, borderRadius: 2, margin: "0 auto 12px" }}></div>
+            <div style={{ fontSize: 12, color: BRAND.textMuted, fontFamily: FONT, fontWeight: 500 }}>
+              Powered by <span style={{ color: BRAND.textSecondary, fontWeight: 600 }}>Bookfunnels.io</span>
+            </div>
           </div>
         </div>
       );
