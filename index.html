@@ -41,9 +41,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.1.3",
+      version: "0.1.4",
       date: "2026-04-17",
       changes: [
+        "0.1.4 - Fixed epigraph parsing (handles attribution on same line), fixed drop cap text split",
         "0.1.3 - Fixed jsPDF CDN version (2.5.1), added error handling, added version badge",
         "0.1.2 - Switched to Inter font across UI, light theme with GCWB branding",
         "0.1.1 - Added sample data loader, chapter detection, epigraph parsing",
@@ -92,25 +93,51 @@
           }
           currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "" };
           buffer = [];
+          
+          // Look ahead for epigraph (quoted text after chapter heading)
           let checkLines = [];
-          for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+          for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
             const nl = lines[j].trim();
             if (nl) checkLines.push({ line: nl, idx: j });
           }
           if (checkLines.length > 0) {
             const firstContent = checkLines[0].line;
             if (firstContent.startsWith('"') || firstContent.startsWith("\u201C") || firstContent.startsWith("'")) {
-              let epLines = [];
-              let attrLine = "";
-              for (const cl of checkLines) {
-                if (cl.line.startsWith("- ") || cl.line.startsWith("\u2014") || cl.line.startsWith("\u2013")) {
-                  attrLine = cl.line.replace(/^[-\u2014\u2013]\s*/, ""); i = cl.idx; break;
+              // Check if attribution is on the same line: "Quote text" - Author Name
+              const sameLineMatch = firstContent.match(/^["'\u201C](.+?)["'\u201D]\s*[-\u2014\u2013]\s*(.+)$/);
+              if (sameLineMatch) {
+                // Attribution on same line
+                currentChapter.epigraph = sameLineMatch[1];
+                currentChapter.epigraphAttribution = sameLineMatch[2];
+                i = checkLines[0].idx;
+              } else {
+                // Multi-line epigraph: collect lines until we find attribution or a non-quote line
+                let epLines = [];
+                for (const cl of checkLines) {
+                  // Check for standalone attribution line
+                  if (cl.line.startsWith("- ") || cl.line.startsWith("\u2014") || cl.line.startsWith("\u2013")) {
+                    currentChapter.epigraphAttribution = cl.line.replace(/^[-\u2014\u2013]\s*/, "");
+                    i = cl.idx;
+                    break;
+                  }
+                  // Check if this line ends with closing quote + attribution
+                  const endMatch = cl.line.match(/["'\u201D]\s*[-\u2014\u2013]\s*(.+)$/);
+                  if (endMatch) {
+                    epLines.push(cl.line.replace(/\s*[-\u2014\u2013]\s*.+$/, ""));
+                    currentChapter.epigraphAttribution = endMatch[1];
+                    i = cl.idx;
+                    break;
+                  }
+                  // If line doesn't look like part of a quote (no quote marks, not short), stop
+                  if (epLines.length > 0 && !cl.line.match(/["'\u201C\u201D]/) && cl.line.length > 80) {
+                    break;
+                  }
+                  epLines.push(cl.line);
+                  i = cl.idx;
                 }
-                epLines.push(cl.line); i = cl.idx;
-              }
-              if (epLines.length > 0) {
-                currentChapter.epigraph = epLines.join(" ").replace(/["\u201C\u201D]/g, "");
-                currentChapter.epigraphAttribution = attrLine;
+                if (epLines.length > 0) {
+                  currentChapter.epigraph = epLines.join(" ").replace(/["\u201C\u201D']/g, "").trim();
+                }
               }
             }
           }
