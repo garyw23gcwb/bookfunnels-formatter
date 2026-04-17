@@ -41,17 +41,17 @@
     };
 
     const APP_VERSION = {
-      version: "0.2.2",
+      version: "0.3.0",
       date: "2026-04-17",
       changes: [
-        "0.2.2 - Expanded sample data: 3 chapters + 1 section, Ch3 has no epigraph, more body text per chapter, 'Making It Happen' tests non-chapter sections",
-        "0.2.1 - Fixed TOC dot leaders for long titles, TOC shows chapter titles without prefix, wider dot spacing",
-        "0.2.0 - Two-pass rendering for accurate TOC page numbers, dot leaders in TOC, improved chapter layout, en-dash attribution",
-        "0.1.4 - Fixed epigraph parsing (handles attribution on same line), fixed drop cap text split",
-        "0.1.3 - Fixed jsPDF CDN version (2.5.1), added error handling, added version badge",
-        "0.1.2 - Switched to Inter font across UI, light theme with GCWB branding",
-        "0.1.1 - Added sample data loader, chapter detection, epigraph parsing",
-        "0.1.0 - Initial prototype with 5x8 formatting spec from print-ready PDF analysis",
+        "0.3.0 - Font embedding: Gelasio (body/titles), EB Garamond (epigraphs/dedication), Inter (headers/page numbers) loaded from Google Fonts and embedded in PDF",
+        "0.2.2 - Expanded sample data with 4 test cases (epigraph/no epigraph/named section)",
+        "0.2.1 - Fixed TOC dot leaders for long titles, TOC shows chapter titles without prefix",
+        "0.2.0 - Two-pass rendering for accurate TOC page numbers, dot leaders, en-dash attribution",
+        "0.1.4 - Fixed epigraph parsing (handles attribution on same line)",
+        "0.1.3 - Fixed jsPDF CDN version (2.5.1), added version badge",
+        "0.1.2 - Inter font across UI, light theme with GCWB branding",
+        "0.1.0 - Initial prototype",
       ]
     };
 
@@ -152,15 +152,83 @@
       return chapters;
     }
 
+    // Font loading utility
+    async function loadFontsForPDF(doc, onProgress) {
+      onProgress("Loading fonts...");
+      
+      // Google Fonts CSS API returns TTF URLs when requested with an older user-agent
+      const fontCSS = await fetch(
+        "https://fonts.googleapis.com/css2?family=Gelasio:ital,wght@0,400;0,700;1,400&family=EB+Garamond:ital@1&family=Inter:wght@400&display=swap",
+        { headers: { "User-Agent": "Mozilla/4.0" } }
+      ).then(function(r) { return r.text(); });
+      
+      // Parse TTF URLs from the CSS
+      const urlMatches = fontCSS.matchAll(/font-family:\s*'([^']+)'[\s\S]*?font-style:\s*(\w+)[\s\S]*?font-weight:\s*(\d+)[\s\S]*?url\((https:\/\/fonts\.gstatic\.com\/[^)]+\.ttf)\)/g);
+      
+      const fontMap = {};
+      for (const match of urlMatches) {
+        const family = match[1];
+        const style = match[2];
+        const weight = match[3];
+        const url = match[4];
+        const key = family + "-" + style + "-" + weight;
+        fontMap[key] = { family: family, style: style, weight: weight, url: url };
+      }
+      
+      // Fetch each font file and register with jsPDF
+      for (const key in fontMap) {
+        const font = fontMap[key];
+        try {
+          const response = await fetch(font.url);
+          const buffer = await response.arrayBuffer();
+          const binary = new Uint8Array(buffer);
+          
+          // Convert to binary string for jsPDF
+          let binaryStr = "";
+          for (let i = 0; i < binary.length; i++) {
+            binaryStr += String.fromCharCode(binary[i]);
+          }
+          
+          // Determine jsPDF font style
+          let jsPDFStyle = "normal";
+          if (font.style === "italic" && font.weight === "700") jsPDFStyle = "bolditalic";
+          else if (font.style === "italic") jsPDFStyle = "italic";
+          else if (font.weight === "700") jsPDFStyle = "bold";
+          
+          const fileName = font.family.replace(/\s+/g, "") + "-" + jsPDFStyle + ".ttf";
+          doc.addFileToVFS(fileName, binaryStr);
+          doc.addFont(fileName, font.family, jsPDFStyle);
+          
+          onProgress("Loaded " + font.family + " " + jsPDFStyle + "...");
+        } catch (e) {
+          console.warn("Failed to load font: " + key, e);
+        }
+      }
+      
+      return Object.keys(fontMap).length > 0;
+    }
+
     async function generatePDF(bookData, chapters, onProgress) {
       onProgress("Loading PDF library...");
       
       if (!window.jspdf || !window.jspdf.jsPDF) {
-        throw new Error("jsPDF library not loaded. Please refresh the page and try again. (window.jspdf = " + typeof window.jspdf + ")");
+        throw new Error("jsPDF library not loaded. Please refresh the page and try again.");
       }
       
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
+      
+      // Try to load custom fonts
+      const fontsLoaded = await loadFontsForPDF(doc, onProgress).catch(function(e) {
+        console.warn("Font loading failed, falling back to helvetica:", e);
+        return false;
+      });
+      
+      // Font helpers - use custom fonts if loaded, fallback to helvetica
+      const BODY_FONT = fontsLoaded ? "Gelasio" : "helvetica";
+      const EPIGRAPH_FONT = fontsLoaded ? "EB Garamond" : "helvetica";
+      const HEADER_FONT = fontsLoaded ? "Inter" : "helvetica";
+      
       let pageNum = 0;
       let bookPageNum = 0;
 
@@ -172,21 +240,21 @@
 
       function addRunningHeader(chapterTitle) {
         const m = getMargins();
-        doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        doc.setFont(HEADER_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
         if (isRecto()) { doc.text(chapterTitle, SPEC.pageW - m.outside, m.top + SPEC.headerSize, { align: "right" }); }
         else { doc.text(bookData.title, m.inside, m.top + SPEC.headerSize); }
       }
 
       function addPageNumber(num) {
         const m = getMargins();
-        doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        doc.setFont(HEADER_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
         if (isRecto()) { doc.text(String(num), SPEC.pageW - m.outside, SPEC.pageNumY, { align: "right" }); }
         else { doc.text(String(num), m.inside, SPEC.pageNumY); }
       }
 
       function wrapText(text, maxWidth, fontSize, fontStyle) {
         fontStyle = fontStyle || "normal";
-        doc.setFontSize(fontSize); doc.setFont("helvetica", fontStyle);
+        doc.setFontSize(fontSize); doc.setFont(BODY_FONT, fontStyle);
         return doc.splitTextToSize(text, maxWidth);
       }
 
@@ -198,7 +266,7 @@
         let y = 100;
         doc.setFillColor(30, 30, 30);
         doc.rect(getTextX(), y - 20, getTextWidth(), 35, "F");
-        doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(255);
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(16); doc.setTextColor(255);
         doc.text("READER BONUS", SPEC.pageW / 2, y + 2, { align: "center" });
         doc.setTextColor(30); y += 50;
         doc.setFontSize(24);
@@ -207,7 +275,7 @@
         y += 20;
         if (bookData.ctaBody) {
           const lines = wrapText(bookData.ctaBody, getTextWidth() - 20, 11);
-          doc.setFontSize(11); doc.setFont("helvetica", "normal");
+          doc.setFontSize(11); doc.setFont(BODY_FONT, "normal");
           for (const line of lines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 15; }
         }
         y += 30;
@@ -215,7 +283,7 @@
           doc.setFillColor(30, 30, 30);
           const urlWidth = doc.getTextWidth(bookData.ctaUrl) + 40;
           doc.rect(SPEC.pageW / 2 - urlWidth / 2, y - 15, urlWidth, 30, "F");
-          doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(255);
+          doc.setFont(BODY_FONT, "bold"); doc.setFontSize(12); doc.setTextColor(255);
           doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 3, { align: "center" }); doc.setTextColor(30);
         }
         newPage();
@@ -223,21 +291,21 @@
 
       newPage();
       let ty = 140;
-      doc.setFont("helvetica", "bold"); doc.setFontSize(28); doc.setTextColor(30);
+      doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28); doc.setTextColor(30);
       const titleLines = wrapText(bookData.title, getTextWidth(), 28, "bold");
       for (const line of titleLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 35; }
       ty += 10; doc.setDrawColor(30); doc.setLineWidth(0.5);
       doc.line(SPEC.pageW / 2 - 80, ty, SPEC.pageW / 2 + 80, ty); ty += 25;
       if (bookData.subtitle) {
-        doc.setFont("helvetica", "normal"); doc.setFontSize(16);
+        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(16);
         const subLines = wrapText(bookData.subtitle, getTextWidth(), 16);
         for (const line of subLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 22; }
       }
-      ty = 430; doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+      ty = 430; doc.setFont(BODY_FONT, "bold"); doc.setFontSize(14);
       doc.text(bookData.author.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" });
 
       newPage();
-      ty = 340; doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(60);
+      ty = 340; doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
       if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" }); ty += 20; }
       doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, SPEC.pageW / 2, ty, { align: "center" }); ty += 18;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
@@ -248,7 +316,7 @@
 
       if (bookData.dedication) {
         newPage(); ty = 150;
-        doc.setFont("helvetica", "italic"); doc.setFontSize(12);
+        doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(12);
         const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
         for (const para of dedLines) {
           const wrapped = wrapText(para, getTextWidth() - 40, 12, "italic");
@@ -277,7 +345,7 @@
           const para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
             // Drop cap takes ~3 lines at the narrow width, then continues at full width
-            doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.dropCapSize);
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize);
             const dropCapWidth = doc.getTextWidth(para[0].toUpperCase()) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
@@ -297,7 +365,7 @@
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
-          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.bodySize);
+          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
           const lines = doc.splitTextToSize(para, textW);
           for (const line of lines) {
             if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
@@ -313,12 +381,12 @@
         let y = 55;
         if (ch.num) y += 45;
         // Title
-        doc.setFont("helvetica", "bold"); doc.setFontSize(SPEC.chapterTitleSize);
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
         const titleWrapped = doc.splitTextToSize(ch.title, 252);
         y += titleWrapped.length * 28 + 35;
         // Epigraph
         if (ch.epigraph) {
-          doc.setFont("helvetica", "italic"); doc.setFontSize(14);
+          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
           const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", 192);
           y += epLines.length * 20;
           if (ch.epigraphAttribution) y += 20;
@@ -345,7 +413,7 @@
       // ---- PASS 2: RENDER TOC WITH CORRECT PAGE NUMBERS ----
       onProgress("Building table of contents...");
       newPage(); ty = 60;
-      doc.setFont("helvetica", "bold"); doc.setFontSize(22); doc.setTextColor(30);
+      doc.setFont(BODY_FONT, "bold"); doc.setFontSize(22); doc.setTextColor(30);
       doc.text("Contents", SPEC.pageW / 2, ty, { align: "center" }); ty += 50;
 
       const tocTextX = getTextX();
@@ -358,7 +426,7 @@
         const displayTitle = ch.title || ch.num;
         const pageNumStr = String(chapterPageNumbers[i]);
 
-        doc.setFont("helvetica", "normal"); doc.setFontSize(11); doc.setTextColor(30);
+        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11); doc.setTextColor(30);
         
         // Reserve space for page number + minimum dot leaders
         const pageNumWidth = doc.getTextWidth(pageNumStr);
@@ -417,20 +485,20 @@
 
         // Chapter number label
         if (ch.num) {
-          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
+          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
           doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" }); 
           y += 45;
         }
 
         // Chapter title
-        doc.setFont("helvetica", "bold"); doc.setFontSize(SPEC.chapterTitleSize);
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
         const titleWrapped = wrapText(ch.title, textW, SPEC.chapterTitleSize, "bold");
         for (const line of titleWrapped) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 28; }
         y += 35;
 
         // Epigraph
         if (ch.epigraph) {
-          doc.setFont("helvetica", "italic"); doc.setFontSize(14);
+          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
           const epText = "\u201C" + ch.epigraph + "\u201D";
           const epLines = wrapText(epText, textW - 60, 14, "italic");
           for (const line of epLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 20; }
@@ -456,7 +524,7 @@
           if (isFirstPara && para.length > 0) {
             const dropLetter = para[0].toUpperCase();
             const restText = para.slice(1);
-            doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.dropCapSize); doc.setTextColor(30);
             const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
             doc.text(dropLetter, textX, y + SPEC.dropCapSize * 0.75);
             doc.setFontSize(SPEC.bodySize);
@@ -480,7 +548,7 @@
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
-          doc.setFont("helvetica", "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
           const lines = wrapText(para, textW, SPEC.bodySize);
           for (const line of lines) {
             if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
