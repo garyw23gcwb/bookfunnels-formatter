@@ -6,7 +6,7 @@
   <title>Tinybook Formatter - bookfunnels.io</title>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
+  <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.9",
+      version: "0.6.0",
       date: "2026-04-18",
       changes: [
+        "0.6.0 - Enhanced .docx support with better error detection, improved mammoth.js loading, and fallback guidance for upload issues.",
         "0.5.9 - Improved .docx file processing with better error handling and debugging for upload issues.",
         "0.5.8 - Added .docx file upload support (via mammoth.js) and fixed TOC page number alignment for consistent dot leaders.",
         "0.5.7 - Fixed cramped dedication page layout (wider text area) and renamed text size option to 'Spacious' for better UI clarity.",
@@ -1010,40 +1011,61 @@
         const fileName = file.name.toLowerCase();
         setError(''); // Clear any previous errors
         
+        console.log('File selected:', fileName, 'Size:', file.size, 'Type:', file.type);
+        
         if (fileName.endsWith('.docx')) {
           // Handle .docx files with mammoth.js
+          console.log('Processing .docx file...');
+          console.log('Mammoth available?', typeof mammoth !== 'undefined');
+          console.log('Mammoth object:', typeof mammoth === 'object' ? Object.keys(mammoth) : mammoth);
+          
           if (typeof mammoth === 'undefined') {
-            setError('DOCX support not loaded. Please refresh the page and try again.');
+            setError('DOCX support library not loaded. Please refresh the page and try again.');
+            return;
+          }
+          
+          if (typeof mammoth.extractRawText !== 'function') {
+            setError('DOCX support library incomplete. Please refresh the page and try again.');
             return;
           }
           
           setProgress('Reading Word document...');
-          mammoth.extractRawText(file).then(function(result) {
-            let extractedText = result.value || '';
-            
-            // Clean up the text - mammoth sometimes adds extra whitespace
-            extractedText = extractedText
-              .replace(/\r\n/g, '\n')  // Normalize line endings
-              .replace(/\n{3,}/g, '\n\n')  // Collapse multiple empty lines to double
-              .trim();
-            
-            console.log('Extracted text length:', extractedText.length);
-            console.log('First 200 chars:', extractedText.substring(0, 200));
-            
-            setRawText(extractedText);
+          console.log('Calling mammoth.extractRawText...');
+          
+          try {
+            mammoth.extractRawText(file).then(function(result) {
+              console.log('Mammoth success:', result);
+              let extractedText = result.value || '';
+              
+              // Clean up the text - mammoth sometimes adds extra whitespace
+              extractedText = extractedText
+                .replace(/\r\n/g, '\n')  // Normalize line endings
+                .replace(/\n{3,}/g, '\n\n')  // Collapse multiple empty lines to double
+                .trim();
+              
+              console.log('Extracted text length:', extractedText.length);
+              console.log('First 200 chars:', extractedText.substring(0, 200));
+              
+              setRawText(extractedText);
+              setProgress('');
+              
+              // Show any mammoth warnings
+              if (result.messages && result.messages.length > 0) {
+                console.log('Mammoth warnings:', result.messages);
+              }
+            }).catch(function(err) {
+              console.error('Mammoth error:', err);
+              setError('Failed to read Word document: ' + (err.message || 'Unknown error. Try saving your Word document as .txt instead.'));
+              setProgress('');
+            });
+          } catch (syncError) {
+            console.error('Mammoth sync error:', syncError);
+            setError('Failed to process Word document: ' + syncError.message);
             setProgress('');
-            
-            // Show any mammoth warnings
-            if (result.messages && result.messages.length > 0) {
-              console.log('Mammoth warnings:', result.messages);
-            }
-          }).catch(function(err) {
-            console.error('DOCX parsing error:', err);
-            setError('Failed to read Word document: ' + (err.message || 'Unknown error'));
-            setProgress('');
-          });
+          }
         } else {
           // Handle .txt and .md files
+          console.log('Processing text file...');
           const reader = new FileReader();
           reader.onload = function(ev) { 
             const text = ev.target.result || '';
@@ -1152,7 +1174,7 @@
                   <StepBadge num="2" />
                   <SectionLabel>Manuscript</SectionLabel>
                 </div>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt or .docx file. The formatter will automatically detect chapters.</p>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt or .docx file. The formatter will automatically detect chapters. <em>If .docx upload fails, save your Word document as .txt and try again.</em></p>
                 <label style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid " + BRAND.border, cursor: "pointer", fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary, background: BRAND.white, display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
                   Upload .txt or .docx File
                   <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
