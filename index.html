@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.8",
+      version: "0.5.9",
       date: "2026-04-18",
       changes: [
+        "0.5.9 - Improved .docx file processing with better error handling and debugging for upload issues.",
         "0.5.8 - Added .docx file upload support (via mammoth.js) and fixed TOC page number alignment for consistent dot leaders.",
         "0.5.7 - Fixed cramped dedication page layout (wider text area) and renamed text size option to 'Spacious' for better UI clarity.",
         "0.5.6 - Added body text size option. Toggle between Default (10pt/15pt) and Spacious (11pt/16.5pt). Drop cap auto-adjusts to maintain proper 3-line span.",
@@ -964,10 +965,23 @@
 
       const updateBook = function(field, value) { setBookData(function(prev) { return Object.assign({}, prev, { [field]: value }); }); };
       const handleDetectChapters = function() {
+        console.log('=== Chapter Detection Debug ===');
+        console.log('Raw text length:', rawText.length);
+        console.log('Raw text (first 500 chars):', rawText.substring(0, 500));
+        console.log('Raw text (trimmed):', rawText.trim().length > 0);
+        
         const detected = detectChapters(rawText);
+        console.log('Detected chapters:', detected.length);
+        detected.forEach(function(ch, i) {
+          console.log(`Chapter ${i + 1}:`, { num: ch.num, title: ch.title, bodyLength: ch.body.length });
+        });
+        
         if (detected.length === 0) {
+          console.log('No chapters detected, creating single chapter with all text');
           setChapters([{ id: Math.random().toString(36).slice(2), num: "Chapter 1", title: "Untitled", epigraph: "", epigraphAttribution: "", body: rawText }]);
-        } else { setChapters(detected); }
+        } else { 
+          setChapters(detected); 
+        }
         setStep(2);
       };
       const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
@@ -994,6 +1008,7 @@
         if (!file) return;
         
         const fileName = file.name.toLowerCase();
+        setError(''); // Clear any previous errors
         
         if (fileName.endsWith('.docx')) {
           // Handle .docx files with mammoth.js
@@ -1004,16 +1019,41 @@
           
           setProgress('Reading Word document...');
           mammoth.extractRawText(file).then(function(result) {
-            setRawText(result.value);
+            let extractedText = result.value || '';
+            
+            // Clean up the text - mammoth sometimes adds extra whitespace
+            extractedText = extractedText
+              .replace(/\r\n/g, '\n')  // Normalize line endings
+              .replace(/\n{3,}/g, '\n\n')  // Collapse multiple empty lines to double
+              .trim();
+            
+            console.log('Extracted text length:', extractedText.length);
+            console.log('First 200 chars:', extractedText.substring(0, 200));
+            
+            setRawText(extractedText);
             setProgress('');
+            
+            // Show any mammoth warnings
+            if (result.messages && result.messages.length > 0) {
+              console.log('Mammoth warnings:', result.messages);
+            }
           }).catch(function(err) {
-            setError('Failed to read Word document: ' + err.message);
+            console.error('DOCX parsing error:', err);
+            setError('Failed to read Word document: ' + (err.message || 'Unknown error'));
             setProgress('');
           });
         } else {
           // Handle .txt and .md files
           const reader = new FileReader();
-          reader.onload = function(ev) { setRawText(ev.target.result || ""); };
+          reader.onload = function(ev) { 
+            const text = ev.target.result || '';
+            console.log('Text file loaded, length:', text.length);
+            setRawText(text);
+          };
+          reader.onerror = function(err) {
+            console.error('File reading error:', err);
+            setError('Failed to read text file.');
+          };
           reader.readAsText(file);
         }
       };
