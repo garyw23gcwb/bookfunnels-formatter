@@ -97,9 +97,12 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.1",
+      version: "0.6.4",
       date: "2026-04-18",
       changes: [
+        "0.6.4 - Reduced dedication font size from 12pt to 10pt for better proportion with body text.",
+        "0.6.3 - Fixed reader bonus layout to match RB.pdf example, improved drop cap spacing, and resolved font rendering issues on new pages.",
+        "0.6.2 - Added comprehensive error handling and progress indicators for file uploads. Errors now display prominently in the UI instead of only in console.",
         "0.6.1 - Fixed .docx upload by using ArrayBuffer format for mammoth.js processing instead of direct File object.",
         "0.6.0 - Enhanced .docx support with better error detection, improved mammoth.js loading, and fallback guidance for upload issues.",
         "0.5.9 - Improved .docx file processing with better error handling and debugging for upload issues.",
@@ -316,6 +319,13 @@
       function getMargins() { return isRecto() ? SPEC.margins.recto : SPEC.margins.verso; }
       function getTextWidth() { const m = getMargins(); return SPEC.pageW - m.inside - m.outside; }
       function getTextX() { return getMargins().inside; }
+      
+      // Helper function to reset font properties after page breaks
+      function resetBodyFont() {
+        doc.setFont(BODY_FONT, "normal");
+        doc.setFontSize(SPEC.bodySize);
+        doc.setTextColor(30);
+      }
 
       function addRunningHeader(chapterTitle) {
         const m = getMargins();
@@ -438,28 +448,43 @@
 
       if (bookData.ctaTitle) {
         newPage();
-        let y = 100;
+        let y = 60;
+        
+        // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
-        doc.rect(getTextX(), y - 20, getTextWidth(), 35, "F");
-        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(16); doc.setTextColor(255);
-        doc.text("READER BONUS", SPEC.pageW / 2, y + 2, { align: "center" });
-        doc.setTextColor(30); y += 50;
-        doc.setFontSize(24);
-        const ctaLines = wrapText(bookData.ctaTitle, getTextWidth(), 24, "bold");
-        for (const line of ctaLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 32; }
-        y += 20;
-        if (bookData.ctaBody) {
-          const lines = wrapText(bookData.ctaBody, getTextWidth() - 20, 11);
-          doc.setFontSize(11); doc.setFont(BODY_FONT, "normal");
-          for (const line of lines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 15; }
+        doc.rect(getTextX(), y, getTextWidth(), 40, "F");
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(255);
+        doc.text("READER BONUS", SPEC.pageW / 2, y + 27, { align: "center" });
+        doc.setTextColor(30); 
+        y += 70;
+        
+        // Main title with proper text wrapping
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28);
+        const ctaLines = wrapTitle(bookData.ctaTitle, getTextWidth() - 40, 28);
+        for (const line of ctaLines) { 
+          doc.text(line, SPEC.pageW / 2, y, { align: "center" }); 
+          y += 35; 
         }
         y += 30;
+        
+        // Description text with proper wrapping and spacing
+        if (bookData.ctaBody) {
+          const lines = wrapText(bookData.ctaBody, getTextWidth() - 60, 14);
+          doc.setFontSize(14); doc.setFont(BODY_FONT, "normal");
+          for (const line of lines) { 
+            doc.text(line, SPEC.pageW / 2, y, { align: "center" }); 
+            y += 18; 
+          }
+        }
+        y += 40;
+        
+        // URL in black bar at bottom
         if (bookData.ctaUrl) {
           doc.setFillColor(30, 30, 30);
-          const urlWidth = doc.getTextWidth(bookData.ctaUrl) + 40;
-          doc.rect(SPEC.pageW / 2 - urlWidth / 2, y - 15, urlWidth, 30, "F");
-          doc.setFont(BODY_FONT, "bold"); doc.setFontSize(12); doc.setTextColor(255);
-          doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 3, { align: "center" }); doc.setTextColor(30);
+          doc.rect(getTextX(), y, getTextWidth(), 40, "F");
+          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(16); doc.setTextColor(255);
+          doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 27, { align: "center" });
+          doc.setTextColor(30);
         }
         newPage();
       }
@@ -491,12 +516,12 @@
 
       if (bookData.dedication) {
         newPage(); ty = 150;
-        doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(12);
+        doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(10);
         const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
         for (const para of dedLines) {
-          const wrapped = wrapText(para, getTextWidth() - 20, 12, "italic");
-          for (const line of wrapped) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 18; }
-          ty += 12;
+          const wrapped = wrapText(para, getTextWidth() - 20, 10, "italic");
+          for (const line of wrapped) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 16; }
+          ty += 10;
         }
         newPage();
       }
@@ -760,9 +785,11 @@
               } else break;
             }
             if (remainingText.length > 0) {
+              // Add a small gap between drop cap section and remaining text
+              y += 3;
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
               for (const line of fullLines) {
-                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
+                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; resetBodyFont(); }
                 doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
               }
             }
@@ -791,6 +818,7 @@
                 newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
                 addPageNumber(bookPageNum + pagesUsed); 
                 y = getMargins().top + 30;
+                resetBodyFont();
               }
             }
             
@@ -800,6 +828,7 @@
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
               addPageNumber(bookPageNum + pagesUsed); 
               y = getMargins().top + 30;
+              resetBodyFont();
             }
           }
           
@@ -1011,8 +1040,20 @@
         
         const fileName = file.name.toLowerCase();
         setError(''); // Clear any previous errors
+        setProgress(''); // Clear any previous progress
         
         console.log('File selected:', fileName, 'Size:', file.size, 'Type:', file.type);
+        
+        // Basic file validation
+        if (file.size === 0) {
+          setError('The selected file is empty.');
+          return;
+        }
+        
+        if (file.size > 50 * 1024 * 1024) { // 50MB limit
+          setError('File is too large (max 50MB). Try a smaller document.');
+          return;
+        }
         
         if (fileName.endsWith('.docx')) {
           // Handle .docx files with mammoth.js
@@ -1037,9 +1078,22 @@
             const arrayBuffer = e.target.result;
             console.log('ArrayBuffer created, size:', arrayBuffer.byteLength);
             
+            if (arrayBuffer.byteLength === 0) {
+              setError('The selected file appears to be empty or corrupted.');
+              setProgress('');
+              return;
+            }
+            
             mammoth.extractRawText({arrayBuffer: arrayBuffer}).then(function(result) {
               console.log('Mammoth success:', result);
               let extractedText = result.value || '';
+              
+              // Check if extraction actually worked
+              if (extractedText.length === 0) {
+                setError('No text could be extracted from this Word document. Try saving it as .txt instead.');
+                setProgress('');
+                return;
+              }
               
               // Clean up the text - mammoth sometimes adds extra whitespace
               extractedText = extractedText
@@ -1059,7 +1113,7 @@
               }
             }).catch(function(err) {
               console.error('Mammoth extraction error:', err);
-              setError('Failed to read Word document: ' + (err.message || 'Unknown error. Try saving your Word document as .txt instead.'));
+              setError('Could not read Word document: ' + (err.message || 'File may be corrupted or password-protected. Try saving as .txt instead.'));
               setProgress('');
             });
           };
@@ -1183,6 +1237,17 @@
                   <SectionLabel>Manuscript</SectionLabel>
                 </div>
                 <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt or .docx file. The formatter will automatically detect chapters. <em>If .docx upload fails, save your Word document as .txt and try again.</em></p>
+                
+                {progress && (
+                  <div style={{ padding: 12, background: BRAND.light, border: "1px solid " + BRAND.border, borderRadius: 10, marginBottom: 16 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, fontFamily: FONT, color: BRAND.accentDeep }}>{progress}</div>
+                  </div>
+                )}
+                {error && (
+                  <div style={{ padding: 16, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontFamily: FONT, color: "#991B1B", fontWeight: 500 }}>{error}</div>
+                  </div>
+                )}
                 <label style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid " + BRAND.border, cursor: "pointer", fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary, background: BRAND.white, display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
                   Upload .txt or .docx File
                   <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
