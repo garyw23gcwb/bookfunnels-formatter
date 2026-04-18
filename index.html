@@ -47,19 +47,35 @@
 
     const FONT = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
 
-    const SPEC = {
-      pageW: 360, pageH: 576, bodySize: 10, lineHeight: 15, paraGap: 5,
-      headerSize: 8, chapterNumSize: 16, chapterTitleSize: 20,
-      epigraphSize: 18, dropCapLines: 3,
-      // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
-      // as a fraction of font size). Gelasio and most serifs sit around 0.72.
-      capHeightRatio: 0.72,
-      margins: {
-        verso: { inside: 42, outside: 66, top: 24, bottom: 30 },
-        recto: { inside: 66, outside: 42, top: 24, bottom: 30 },
-      },
-      pageNumY: 546,
+    // Text size presets
+    const TEXT_PRESETS = {
+      default: { bodySize: 10, lineHeight: 15, label: "Default (10pt/15pt)" },
+      lisa: { bodySize: 11, lineHeight: 16.5, label: "Lisa Style (11pt/16.5pt)" }
     };
+
+    // Create configurable SPEC object - will be updated based on selected preset
+    function createSpec(textPreset = 'default') {
+      const preset = TEXT_PRESETS[textPreset];
+      return {
+        pageW: 360, pageH: 576, 
+        bodySize: preset.bodySize, 
+        lineHeight: preset.lineHeight, 
+        paraGap: 5,
+        headerSize: 8, chapterNumSize: 16, chapterTitleSize: 20,
+        epigraphSize: 18, dropCapLines: 3,
+        // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
+        // as a fraction of font size). Gelasio and most serifs sit around 0.72.
+        capHeightRatio: 0.72,
+        margins: {
+          verso: { inside: 42, outside: 66, top: 24, bottom: 30 },
+          recto: { inside: 66, outside: 42, top: 24, bottom: 30 },
+        },
+        pageNumY: 546,
+      };
+    }
+
+    // Default spec for initial UI rendering
+    let SPEC = createSpec('default');
 
     // Drop cap font size is computed so that its cap-height spans exactly dropCapLines
     // of body text at the current line height. This matches how InDesign's "span N lines"
@@ -67,7 +83,10 @@
     //   cap-height wanted = dropCapLines * lineHeight
     //   font size needed  = cap-height wanted / capHeightRatio
     // For 10pt body / 15pt leading / 3 lines / 0.72 ratio ≈ 62.5pt font size
-    const DROP_CAP_SIZE = (SPEC.dropCapLines * SPEC.lineHeight) / SPEC.capHeightRatio;
+    // For 11pt body / 16.5pt leading / 3 lines / 0.72 ratio ≈ 68.75pt font size
+    function getDropCapSize() {
+      return (SPEC.dropCapLines * SPEC.lineHeight) / SPEC.capHeightRatio;
+    }
 
     // Widow/orphan control settings
     const WIDOW_ORPHAN = {
@@ -77,9 +96,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.5",
+      version: "0.5.6",
       date: "2026-04-18",
       changes: [
+        "0.5.6 - Added body text size option. Toggle between Default (10pt/15pt) and Lisa Style (11pt/16.5pt). Drop cap auto-adjusts to maintain proper 3-line span.",
         "0.5.5 - Added smart chapter title wrapping. Breaks titles at natural points (after prepositions, at punctuation) and avoids orphaning short words like 'The' or 'Of' at line ends.",
         "0.5.4 - Added widow/orphan control. Prevents short paragraph tails (1-2 lines) from appearing alone on new pages.",
         "0.5.3 - Drop cap now sized correctly to span 3 full body lines (~62pt font size instead of fixed 35pt). Drop cap's cap-height now fills the exact 3-line block it should occupy, matching InDesign's 'span N lines' behaviour.",
@@ -258,8 +278,11 @@
       return loadedCount > 0;
     }
 
-    async function generatePDF(bookData, chapters, onProgress) {
+    async function generatePDF(bookData, chapters, onProgress, textSizePreset = 'default') {
       onProgress("Preparing your book...");
+      
+      // Update SPEC based on selected text size preset
+      SPEC = createSpec(textSizePreset);
       
       if (!window.jspdf || !window.jspdf.jsPDF) {
         throw new Error("jsPDF library not loaded. Please refresh the page and try again.");
@@ -491,7 +514,7 @@
           const para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
             // Drop cap takes ~3 lines at the narrow width, then continues at full width
-            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(DROP_CAP_SIZE);
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(getDropCapSize());
             const dropCapWidth = doc.getTextWidth(para[0].toUpperCase()) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
@@ -705,13 +728,14 @@
             //   - First body line baseline is at (y + BASELINE_OFFSET)
             //   - Cap-height for most serif fonts is capHeightRatio * font size above baseline
             //   - First line cap-top = (y + BASELINE_OFFSET) - (bodySize * capHeightRatio)
-            //   - Drop cap baseline = firstLineCapTop + (DROP_CAP_SIZE * capHeightRatio)
-            // DROP_CAP_SIZE is sized so cap-height exactly spans dropCapLines of body text,
+            //   - Drop cap baseline = firstLineCapTop + (getDropCapSize() * capHeightRatio)
+            // getDropCapSize() is sized so cap-height exactly spans dropCapLines of body text,
             // making the drop cap visually occupy the full 3-line block.
-            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(DROP_CAP_SIZE); doc.setTextColor(30);
+            const dropCapSize = getDropCapSize();
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(dropCapSize); doc.setTextColor(30);
             const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
             const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * SPEC.capHeightRatio);
-            const dropCapBaseline = firstLineCapTop + (DROP_CAP_SIZE * SPEC.capHeightRatio);
+            const dropCapBaseline = firstLineCapTop + (dropCapSize * SPEC.capHeightRatio);
             doc.text(dropLetter, textX, dropCapBaseline);
 
             // Now render the narrow lines next to the drop cap using the SAME baseline offset
@@ -909,6 +933,7 @@
       const [progress, setProgress] = useState("");
       const [error, setError] = useState("");
       const [pdfUrl, setPdfUrl] = useState(null);
+      const [textSizePreset, setTextSizePreset] = useState('default');
       const [bookData, setBookData] = useState({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
       const [rawText, setRawText] = useState("");
       const [chapters, setChapters] = useState([]);
@@ -948,7 +973,7 @@
       const handleGenerate = async function() {
         setGenerating(true); setProgress("Starting..."); setError("");
         try {
-          const blob = await generatePDF(bookData, chapters, setProgress);
+          const blob = await generatePDF(bookData, chapters, setProgress, textSizePreset);
           if (!blob || blob.size === 0) { setError("PDF generation produced an empty file."); return; }
           setPdfUrl(URL.createObjectURL(blob));
           setStep(4);
@@ -1006,7 +1031,34 @@
                   <StepBadge num="1" />
                   <SectionLabel>Book Details</SectionLabel>
                 </div>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Enter your book information. These details appear on the title page, copyright page, and running headers.</p>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 20, fontFamily: FONT, lineHeight: 1.5 }}>Enter your book information. These details appear on the title page, copyright page, and running headers.</p>
+                
+                <div style={{ marginBottom: 24, padding: 16, background: BRAND.light, borderRadius: 10, border: "1px solid " + BRAND.border }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Body Text Size</div>
+                      <div style={{ fontSize: 12, color: BRAND.textMuted, fontFamily: FONT }}>Choose between default or Lisa-style spacing</div>
+                    </div>
+                    <select 
+                      value={textSizePreset} 
+                      onChange={function(e) { setTextSizePreset(e.target.value); }}
+                      style={{ 
+                        padding: "8px 12px", 
+                        borderRadius: 6, 
+                        border: "1px solid " + BRAND.border, 
+                        background: BRAND.white, 
+                        fontFamily: FONT, 
+                        fontSize: 12,
+                        color: BRAND.textPrimary,
+                        cursor: "pointer"
+                      }}
+                    >
+                      {Object.entries(TEXT_PRESETS).map(function([key, preset]) {
+                        return <option key={key} value={key}>{preset.label}</option>;
+                      })}
+                    </select>
+                  </div>
+                </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <Input label="Book Title *" value={bookData.title} onChange={function(v) { updateBook("title", v); }} placeholder="Get Big Clients With Tiny Books" />
                   <Input label="Author Name *" value={bookData.author} onChange={function(v) { updateBook("author", v); }} placeholder="Gary White" />
