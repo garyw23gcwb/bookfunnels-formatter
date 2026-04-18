@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.4",
+      version: "0.6.5",
       date: "2026-04-18",
       changes: [
+        "0.6.5 - Smart quotes conversion for all user text (titles, body, epigraphs, dedication, copyright). URL on reader bonus page auto-fits inside black bar. TOC no longer truncates titles when page numbers are single digits. Copyright page moved up from 59% to ~35% down. Section pages without chapter numbers now align to the same title baseline as numbered chapters. TOC dot leaders use consistent spacing right-aligned to page number column.",
         "0.6.4 - Reduced dedication font size from 12pt to 10pt for better proportion with body text.",
         "0.6.3 - Fixed reader bonus layout to match RB.pdf example, improved drop cap spacing, and resolved font rendering issues on new pages.",
         "0.6.2 - Added comprehensive error handling and progress indicators for file uploads. Errors now display prominently in the UI instead of only in console.",
@@ -126,6 +127,39 @@
         "0.1.0 - Initial prototype",
       ]
     };
+
+    // Convert straight ASCII quotes and apostrophes to typographic curly equivalents.
+    // Runs on every string that will be rendered into the PDF (titles, body, epigraphs,
+    // dedication, CTA copy) so that the final output matches professional typesetting.
+    // Handles: straight double quotes, straight single quotes/apostrophes, hyphen pairs,
+    // triple-dot ellipsis. Leaves existing curly glyphs untouched.
+    function smartQuotes(s) {
+      if (s == null) return s;
+      let t = String(s);
+      // Triple-dot ellipsis -> single ellipsis char (nicer tracking than three periods)
+      t = t.replace(/\.{3}/g, "\u2026");
+      // Double dashes -> en-dash
+      t = t.replace(/([^-])--([^-])/g, "$1\u2013$2");
+      // Double quotes: opening if at string start, after whitespace, or after opening bracket/paren
+      t = t.replace(/(^|[\s\(\[\{\u2014\u2013])"/g, "$1\u201C");
+      t = t.replace(/"/g, "\u201D"); // remaining straight doubles become closing
+      // Single quotes / apostrophes: opening only after whitespace or at start
+      t = t.replace(/(^|[\s\(\[\{\u2014\u2013])'/g, "$1\u2018");
+      t = t.replace(/'/g, "\u2019"); // remaining (including mid-word apostrophes) are closing/apostrophe
+      return t;
+    }
+
+    function smartQuotesDeep(obj) {
+      if (obj == null) return obj;
+      if (typeof obj === "string") return smartQuotes(obj);
+      if (Array.isArray(obj)) return obj.map(smartQuotesDeep);
+      if (typeof obj === "object") {
+        const out = {};
+        for (const k of Object.keys(obj)) out[k] = smartQuotesDeep(obj[k]);
+        return out;
+      }
+      return obj;
+    }
 
     function detectChapters(text) {
       const lines = text.split(/\n/);
@@ -289,7 +323,14 @@
 
     async function generatePDF(bookData, chapters, onProgress, textSizePreset = 'default') {
       onProgress("Preparing your book...");
-      
+
+      // Run every user-supplied string through typographic cleanup before rendering.
+      // URLs are preserved because they should never have curly quotes.
+      const ctaUrlOriginal = bookData && bookData.ctaUrl ? bookData.ctaUrl : "";
+      bookData = smartQuotesDeep(bookData);
+      if (bookData) bookData.ctaUrl = ctaUrlOriginal;
+      chapters = smartQuotesDeep(chapters);
+
       // Update SPEC based on selected text size preset
       SPEC = createSpec(textSizePreset);
       
@@ -478,11 +519,19 @@
         }
         y += 40;
         
-        // URL in black bar at bottom
+        // URL in black bar at bottom. Auto-fit: measure the URL at 16pt and step down
+        // until it fits inside the bar with a comfortable 16pt side padding on each side.
         if (bookData.ctaUrl) {
           doc.setFillColor(30, 30, 30);
           doc.rect(getTextX(), y, getTextWidth(), 40, "F");
-          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(16); doc.setTextColor(255);
+          doc.setFont(BODY_FONT, "normal"); doc.setTextColor(255);
+          const maxUrlWidth = getTextWidth() - 32; // 16pt padding each side
+          let urlSize = 16;
+          doc.setFontSize(urlSize);
+          while (doc.getTextWidth(bookData.ctaUrl) > maxUrlWidth && urlSize > 9) {
+            urlSize -= 0.5;
+            doc.setFontSize(urlSize);
+          }
           doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 27, { align: "center" });
           doc.setTextColor(30);
         }
@@ -505,7 +554,9 @@
       doc.text(bookData.author.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" });
 
       newPage();
-      ty = 340; doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
+      // Copyright page: start block around 35% down the page so the text sits in the upper
+      // middle of the page, which is the standard placement for a copyright/imprint page.
+      ty = 200; doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
       if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" }); ty += 20; }
       doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, SPEC.pageW / 2, ty, { align: "center" }); ty += 18;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
@@ -640,52 +691,63 @@
       const tocTextX = getTextX();
       const tocTextW = getTextWidth();
 
+      // Compute the widest page number actually in this TOC so that short books
+      // (single-digit pages) do not waste a two-digit reservation and truncate titles.
+      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11);
+      let maxPageNumWidth = 0;
+      for (let i = 0; i < chapters.length; i++) {
+        const w = doc.getTextWidth(String(chapterPageNumbers[i]));
+        if (w > maxPageNumWidth) maxPageNumWidth = w;
+      }
+
+      // Consistent dot spacing: measure one dot glyph width + a fixed gap, used for every row.
+      const dotGlyphWidth = doc.getTextWidth(".");
+      const dotStep = dotGlyphWidth + 3; // 3pt gap between dots, same for every row
+
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
         // In the real book TOC, titles are shown without "Chapter X:" prefix
-        // e.g. "Discovering The Tinybook Client System ........... 1"
         const displayTitle = ch.title || ch.num;
         const pageNumStr = String(chapterPageNumbers[i]);
 
         doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11); doc.setTextColor(30);
-        
-        // Reserve space for page number + minimum dot leaders
-        // Use fixed width for page numbers to ensure consistent alignment
-        const maxPageNumWidth = Math.max(doc.getTextWidth("1"), doc.getTextWidth("99")); // Support up to 99 pages
-        const minDotsWidth = 30; // minimum space for dots
-        const maxTitleWidth = tocTextW - maxPageNumWidth - minDotsWidth - 16;
-        
-        // Truncate title if needed
+
+        // Reserve: [title] [gap] [dots...] [gap] [page num, right aligned]
+        const gap = 6;
+        const minDotsSpace = 18; // at least ~5 dots worth
+        const maxTitleWidth = tocTextW - maxPageNumWidth - (gap * 2) - minDotsSpace;
+
+        // Truncate title with ellipsis only if truly necessary
         let truncatedTitle = displayTitle;
         let titleWidth = doc.getTextWidth(truncatedTitle);
         if (titleWidth > maxTitleWidth) {
           while (titleWidth > maxTitleWidth && truncatedTitle.length > 10) {
             truncatedTitle = truncatedTitle.slice(0, -1);
-            titleWidth = doc.getTextWidth(truncatedTitle + "...");
+            titleWidth = doc.getTextWidth(truncatedTitle + "\u2026");
           }
-          truncatedTitle = truncatedTitle + "...";
+          truncatedTitle = truncatedTitle + "\u2026";
           titleWidth = doc.getTextWidth(truncatedTitle);
         }
-        
-        // Draw title
+
+        // Draw title (left)
         doc.text(truncatedTitle, tocTextX, ty);
-        
-        // Draw page number right-aligned
+
+        // Draw page number (right)
         const pageNumX = tocTextX + tocTextW;
         doc.text(pageNumStr, pageNumX, ty, { align: "right" });
-        
-        // Draw dot leaders between title and page number
-        const dotsStart = tocTextX + titleWidth + 6;
-        const dotsEnd = pageNumX - maxPageNumWidth - 6;
-        if (dotsEnd > dotsStart + 10) {
-          let dotX = dotsStart;
-          const dotSpacing = doc.getTextWidth(". ") * 1.2;
-          while (dotX < dotsEnd) {
+
+        // Draw dot leaders between, using the same dotStep for every row so density is consistent
+        const dotsStart = tocTextX + titleWidth + gap;
+        const dotsEnd = pageNumX - maxPageNumWidth - gap;
+        if (dotsEnd > dotsStart) {
+          // Right-align the dots against the page-number column so dots end at the same x on every row
+          let dotX = dotsEnd;
+          while (dotX >= dotsStart) {
             doc.text(".", dotX, ty);
-            dotX += dotSpacing;
+            dotX -= dotStep;
           }
         }
-        
+
         ty += 30;
         if (ty > SPEC.pageH - 80) { newPage(); ty = 60; }
       }
@@ -705,10 +767,15 @@
         const textX = getTextX();
         let y = 55;
 
-        // Chapter number label
+        // Chapter number label. If there's no number (section pages like "Making It
+        // Happen"), still advance y by the same amount so the title baseline matches
+        // a regular chapter's title baseline. This keeps the visual grid consistent
+        // across numbered chapters and named sections.
         if (ch.num) {
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
-          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" }); 
+          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" });
+          y += 45;
+        } else {
           y += 45;
         }
 
