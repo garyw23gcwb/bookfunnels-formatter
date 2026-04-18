@@ -6,6 +6,7 @@
   <title>Tinybook Formatter - bookfunnels.io</title>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -96,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.7",
+      version: "0.5.8",
       date: "2026-04-18",
       changes: [
+        "0.5.8 - Added .docx file upload support (via mammoth.js) and fixed TOC page number alignment for consistent dot leaders.",
         "0.5.7 - Fixed cramped dedication page layout (wider text area) and renamed text size option to 'Spacious' for better UI clarity.",
         "0.5.6 - Added body text size option. Toggle between Default (10pt/15pt) and Spacious (11pt/16.5pt). Drop cap auto-adjusts to maintain proper 3-line span.",
         "0.5.5 - Added smart chapter title wrapping. Breaks titles at natural points (after prepositions, at punctuation) and avoids orphaning short words like 'The' or 'Of' at line ends.",
@@ -620,9 +622,10 @@
         doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11); doc.setTextColor(30);
         
         // Reserve space for page number + minimum dot leaders
-        const pageNumWidth = doc.getTextWidth(pageNumStr);
+        // Use fixed width for page numbers to ensure consistent alignment
+        const maxPageNumWidth = Math.max(doc.getTextWidth("1"), doc.getTextWidth("99")); // Support up to 99 pages
         const minDotsWidth = 30; // minimum space for dots
-        const maxTitleWidth = tocTextW - pageNumWidth - minDotsWidth - 16;
+        const maxTitleWidth = tocTextW - maxPageNumWidth - minDotsWidth - 16;
         
         // Truncate title if needed
         let truncatedTitle = displayTitle;
@@ -645,7 +648,7 @@
         
         // Draw dot leaders between title and page number
         const dotsStart = tocTextX + titleWidth + 6;
-        const dotsEnd = pageNumX - pageNumWidth - 6;
+        const dotsEnd = pageNumX - maxPageNumWidth - 6;
         if (dotsEnd > dotsStart + 10) {
           let dotX = dotsStart;
           const dotSpacing = doc.getTextWidth(". ") * 1.2;
@@ -989,9 +992,30 @@
       const handleFileUpload = function(e) {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = function(ev) { setRawText(ev.target.result || ""); };
-        reader.readAsText(file);
+        
+        const fileName = file.name.toLowerCase();
+        
+        if (fileName.endsWith('.docx')) {
+          // Handle .docx files with mammoth.js
+          if (typeof mammoth === 'undefined') {
+            setError('DOCX support not loaded. Please refresh the page and try again.');
+            return;
+          }
+          
+          setProgress('Reading Word document...');
+          mammoth.extractRawText(file).then(function(result) {
+            setRawText(result.value);
+            setProgress('');
+          }).catch(function(err) {
+            setError('Failed to read Word document: ' + err.message);
+            setProgress('');
+          });
+        } else {
+          // Handle .txt and .md files
+          const reader = new FileReader();
+          reader.onload = function(ev) { setRawText(ev.target.result || ""); };
+          reader.readAsText(file);
+        }
       };
 
       const steps = ["Book Details", "Manuscript", "Chapters", "Preview", "Download"];
@@ -1088,10 +1112,10 @@
                   <StepBadge num="2" />
                   <SectionLabel>Manuscript</SectionLabel>
                 </div>
-                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt file. The formatter will automatically detect chapters.</p>
+                <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 24, fontFamily: FONT, lineHeight: 1.5 }}>Paste your manuscript text or upload a .txt or .docx file. The formatter will automatically detect chapters.</p>
                 <label style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid " + BRAND.border, cursor: "pointer", fontSize: 14, fontFamily: FONT, color: BRAND.textPrimary, background: BRAND.white, display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
-                  Upload .txt File
-                  <input type="file" accept=".txt,.md" onChange={handleFileUpload} style={{ display: "none" }} />
+                  Upload .txt or .docx File
+                  <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
                 </label>
                 <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }}
                   placeholder="Paste your manuscript here..."
