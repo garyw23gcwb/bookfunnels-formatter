@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.5",
+      version: "0.6.6",
       date: "2026-04-18",
       changes: [
+        "0.6.6 - Fixed primary button contrast. Enabled state now uses the stronger brand blue (#8B9BFF base, #4F5FD9 hover) with subtle shadow so the 'ready to proceed' state reads as unambiguously active. Disabled state remains pale lavender at 0.55 opacity. Also added proper native disabled attribute and aria-disabled for accessibility.",
         "0.6.5 - Smart quotes conversion for all user text (titles, body, epigraphs, dedication, copyright). URL on reader bonus page auto-fits inside black bar. TOC no longer truncates titles when page numbers are single digits. Copyright page moved up from 59% to ~35% down. Section pages without chapter numbers now align to the same title baseline as numbered chapters. TOC dot leaders use consistent spacing right-aligned to page number column.",
         "0.6.4 - Reduced dedication font size from 12pt to 10pt for better proportion with body text.",
         "0.6.3 - Fixed reader bonus layout to match RB.pdf example, improved drop cap spacing, and resolved font rendering issues on new pages.",
@@ -965,12 +966,45 @@
 
     function Button({ children, onClick, variant, disabled, style: extraStyle }) {
       variant = variant || "primary";
-      const base = { padding: "11px 24px", borderRadius: 10, border: "none", fontSize: 14, fontFamily: FONT, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", transition: "all 0.2s", opacity: disabled ? 0.5 : 1, display: "inline-flex", alignItems: "center", gap: 6 };
-      const variants = {
-        primary: { background: BRAND.accent, color: BRAND.white },
-        secondary: { background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border },
+      const [hovered, setHovered] = useState(false);
+      const base = {
+        padding: "11px 24px",
+        borderRadius: 10,
+        border: "none",
+        fontSize: 14,
+        fontFamily: FONT,
+        fontWeight: 600,
+        cursor: disabled ? "not-allowed" : "pointer",
+        transition: "all 0.15s",
+        opacity: disabled ? 0.55 : 1,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
       };
-      return <button onClick={disabled ? undefined : onClick} style={Object.assign({}, base, variants[variant], extraStyle)}>{children}</button>;
+      // Primary: strong solid color when enabled (so it clearly reads as "active, click me"),
+      // softer pale-lavender only when disabled. Hover darkens slightly.
+      const variants = {
+        primary: {
+          background: disabled ? BRAND.accent : (hovered ? BRAND.accentDeep : BRAND.accentHover),
+          color: BRAND.white,
+          boxShadow: disabled ? "none" : "0 1px 2px rgba(79, 95, 217, 0.25)",
+        },
+        secondary: {
+          background: BRAND.white,
+          color: BRAND.textSecondary,
+          border: "1px solid " + BRAND.border,
+        },
+      };
+      return (
+        <button
+          onClick={disabled ? undefined : onClick}
+          disabled={disabled}
+          aria-disabled={disabled ? "true" : "false"}
+          onMouseEnter={function() { if (!disabled) setHovered(true); }}
+          onMouseLeave={function() { setHovered(false); }}
+          style={Object.assign({}, base, variants[variant], extraStyle)}
+        >{children}</button>
+      );
     }
 
     function ChapterCard({ chapter, index, onEdit, onRemove }) {
