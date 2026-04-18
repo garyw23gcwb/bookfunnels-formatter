@@ -77,9 +77,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.4",
+      version: "0.5.5",
       date: "2026-04-18",
       changes: [
+        "0.5.5 - Added smart chapter title wrapping. Breaks titles at natural points (after prepositions, at punctuation) and avoids orphaning short words like 'The' or 'Of' at line ends.",
         "0.5.4 - Added widow/orphan control. Prevents short paragraph tails (1-2 lines) from appearing alone on new pages.",
         "0.5.3 - Drop cap now sized correctly to span 3 full body lines (~62pt font size instead of fixed 35pt). Drop cap's cap-height now fills the exact 3-line block it should occupy, matching InDesign's 'span N lines' behaviour.",
         "0.5.2 - Fixed drop cap vertical alignment. The cap-height top of the drop cap now aligns with the cap-height top of the first body line, as it should typographically.",
@@ -307,6 +308,102 @@
         return doc.splitTextToSize(text, maxWidth);
       }
 
+      // Smart title wrapping that considers semantic breaks
+      function wrapTitle(title, maxWidth, fontSize) {
+        doc.setFontSize(fontSize); doc.setFont(BODY_FONT, "bold");
+        
+        // If it fits on one line, return as-is
+        if (doc.getTextWidth(title) <= maxWidth) {
+          return [title];
+        }
+        
+        // Smart breaking rules for better title flow
+        const words = title.split(' ');
+        if (words.length <= 1) {
+          // Single long word, use basic wrapping
+          return doc.splitTextToSize(title, maxWidth);
+        }
+        
+        // Try different break strategies in order of preference
+        const strategies = [
+          // Strategy 1: Break after prepositions and articles at natural pause points
+          function() {
+            const breakAfter = ['the', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'among', 'within'];
+            for (let i = 1; i < words.length - 1; i++) {
+              if (breakAfter.includes(words[i].toLowerCase())) {
+                const firstLine = words.slice(0, i + 1).join(' ');
+                const secondLine = words.slice(i + 1).join(' ');
+                if (doc.getTextWidth(firstLine) <= maxWidth && doc.getTextWidth(secondLine) <= maxWidth) {
+                  return [firstLine, secondLine];
+                }
+              }
+            }
+            return null;
+          },
+          
+          // Strategy 2: Break at punctuation marks
+          function() {
+            const text = title;
+            const puncts = [': ', '- ', '. ', ', ', '; '];
+            for (const punct of puncts) {
+              const idx = text.indexOf(punct);
+              if (idx > 0 && idx < text.length - 2) {
+                const firstLine = text.slice(0, idx + punct.length - 1);
+                const secondLine = text.slice(idx + punct.length);
+                if (doc.getTextWidth(firstLine) <= maxWidth && doc.getTextWidth(secondLine) <= maxWidth) {
+                  return [firstLine, secondLine];
+                }
+              }
+            }
+            return null;
+          },
+          
+          // Strategy 3: Break avoiding orphaned articles/prepositions
+          function() {
+            const orphanWords = ['the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'and', 'or'];
+            for (let i = Math.floor(words.length / 2); i >= 2; i--) {
+              // Don't break before orphan words
+              if (orphanWords.includes(words[i].toLowerCase())) continue;
+              // Don't break after orphan words at line end
+              if (i < words.length - 1 && orphanWords.includes(words[i - 1].toLowerCase())) continue;
+              
+              const firstLine = words.slice(0, i).join(' ');
+              const secondLine = words.slice(i).join(' ');
+              if (doc.getTextWidth(firstLine) <= maxWidth && doc.getTextWidth(secondLine) <= maxWidth) {
+                return [firstLine, secondLine];
+              }
+            }
+            return null;
+          },
+          
+          // Strategy 4: Balanced split (prefer middle)
+          function() {
+            const mid = Math.floor(words.length / 2);
+            for (let offset = 0; offset <= 2; offset++) {
+              for (const i of [mid + offset, mid - offset]) {
+                if (i >= 2 && i < words.length - 1) {
+                  const firstLine = words.slice(0, i).join(' ');
+                  const secondLine = words.slice(i).join(' ');
+                  if (doc.getTextWidth(firstLine) <= maxWidth && doc.getTextWidth(secondLine) <= maxWidth) {
+                    return [firstLine, secondLine];
+                  }
+                }
+              }
+            }
+            return null;
+          }
+        ];
+        
+        // Try each strategy until one works
+        for (const strategy of strategies) {
+          const result = strategy();
+          if (result) return result;
+        }
+        
+        // Fallback: use jsPDF's basic wrapping
+        return doc.splitTextToSize(title, maxWidth);
+      }
+
       onProgress("Generating front matter...");
       newPage(); newPage();
 
@@ -451,9 +548,8 @@
       function calcOpeningHeight(ch) {
         let y = 55;
         if (ch.num) y += 45;
-        // Title
-        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
-        const titleWrapped = doc.splitTextToSize(ch.title, 252);
+        // Title - use same smart wrapping as actual rendering
+        const titleWrapped = wrapTitle(ch.title, 252, SPEC.chapterTitleSize);
         y += titleWrapped.length * 28 + 35;
         // Epigraph
         if (ch.epigraph) {
@@ -563,7 +659,7 @@
 
         // Chapter title
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
-        const titleWrapped = wrapText(ch.title, textW, SPEC.chapterTitleSize, "bold");
+        const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
         for (const line of titleWrapped) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 28; }
         y += 35;
 
