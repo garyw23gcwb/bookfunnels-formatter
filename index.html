@@ -69,10 +69,18 @@
     // For 10pt body / 15pt leading / 3 lines / 0.72 ratio ≈ 62.5pt font size
     const DROP_CAP_SIZE = (SPEC.dropCapLines * SPEC.lineHeight) / SPEC.capHeightRatio;
 
+    // Widow/orphan control settings
+    const WIDOW_ORPHAN = {
+      minLinesAtPageEnd: 2,    // Don't leave fewer than 2 lines at bottom of page
+      minLinesAtPageStart: 2,  // Don't start a page with fewer than 2 lines from previous paragraph
+      enabled: true            // Toggle for testing
+    };
+
     const APP_VERSION = {
-      version: "0.5.3",
-      date: "2026-04-17",
+      version: "0.5.4",
+      date: "2026-04-18",
       changes: [
+        "0.5.4 - Added widow/orphan control. Prevents short paragraph tails (1-2 lines) from appearing alone on new pages.",
         "0.5.3 - Drop cap now sized correctly to span 3 full body lines (~62pt font size instead of fixed 35pt). Drop cap's cap-height now fills the exact 3-line block it should occupy, matching InDesign's 'span N lines' behaviour.",
         "0.5.2 - Fixed drop cap vertical alignment. The cap-height top of the drop cap now aligns with the cap-height top of the first body line, as it should typographically.",
         "0.5.1 - Fixed inconsistent line spacing around drop caps. Drop-cap-adjacent lines now share the same baseline rhythm as the rest of the paragraph.",
@@ -408,6 +416,28 @@
           }
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
           const lines = doc.splitTextToSize(para, textW);
+          
+          // Apply same widow/orphan control as in rendering
+          if (WIDOW_ORPHAN.enabled && lines.length > 0) {
+            let linesOnCurrentPage = 0;
+            let tempY = y;
+            for (const line of lines) {
+              if (tempY > maxY) break;
+              linesOnCurrentPage++;
+              tempY += SPEC.lineHeight;
+            }
+            
+            const remainingLines = lines.length - linesOnCurrentPage;
+            
+            // Widow prevention or orphan prevention
+            if ((remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) ||
+                (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0)) {
+              if (linesOnCurrentPage > 0) {
+                pages++; y = SPEC.margins.recto.top + 30;
+              }
+            }
+          }
+          
           for (const line of lines) {
             if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
             y += SPEC.lineHeight;
@@ -613,6 +643,40 @@
           }
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
           const lines = wrapText(para, textW, SPEC.bodySize);
+          
+          // Widow/orphan control
+          if (WIDOW_ORPHAN.enabled && lines.length > 0) {
+            // Check how many lines can fit on current page
+            let linesOnCurrentPage = 0;
+            let tempY = y;
+            for (const line of lines) {
+              if (tempY > maxY) break;
+              linesOnCurrentPage++;
+              tempY += SPEC.lineHeight;
+            }
+            
+            const remainingLines = lines.length - linesOnCurrentPage;
+            
+            // Widow prevention: if 1-2 lines would be left alone on next page
+            if (remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) {
+              // Force page break before this paragraph to keep it together
+              if (linesOnCurrentPage > 0) {
+                newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
+                addPageNumber(bookPageNum + pagesUsed); 
+                y = getMargins().top + 30;
+              }
+            }
+            
+            // Orphan prevention: if only 1-2 lines would fit at bottom of current page
+            else if (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0) {
+              // Force page break to avoid orphaning just 1-2 lines
+              newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
+              addPageNumber(bookPageNum + pagesUsed); 
+              y = getMargins().top + 30;
+            }
+          }
+          
+          // Render all lines of the paragraph
           for (const line of lines) {
             if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
             doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
