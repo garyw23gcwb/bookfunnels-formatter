@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.0",
+      version: "0.6.1",
       date: "2026-04-18",
       changes: [
+        "0.6.1 - Fixed .docx upload by using ArrayBuffer format for mammoth.js processing instead of direct File object.",
         "0.6.0 - Enhanced .docx support with better error detection, improved mammoth.js loading, and fallback guidance for upload issues.",
         "0.5.9 - Improved .docx file processing with better error handling and debugging for upload issues.",
         "0.5.8 - Added .docx file upload support (via mammoth.js) and fixed TOC page number alignment for consistent dot leaders.",
@@ -1017,7 +1018,6 @@
           // Handle .docx files with mammoth.js
           console.log('Processing .docx file...');
           console.log('Mammoth available?', typeof mammoth !== 'undefined');
-          console.log('Mammoth object:', typeof mammoth === 'object' ? Object.keys(mammoth) : mammoth);
           
           if (typeof mammoth === 'undefined') {
             setError('DOCX support library not loaded. Please refresh the page and try again.');
@@ -1030,10 +1030,14 @@
           }
           
           setProgress('Reading Word document...');
-          console.log('Calling mammoth.extractRawText...');
           
-          try {
-            mammoth.extractRawText(file).then(function(result) {
+          // Convert file to ArrayBuffer for mammoth.js
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const arrayBuffer = e.target.result;
+            console.log('ArrayBuffer created, size:', arrayBuffer.byteLength);
+            
+            mammoth.extractRawText({arrayBuffer: arrayBuffer}).then(function(result) {
               console.log('Mammoth success:', result);
               let extractedText = result.value || '';
               
@@ -1054,15 +1058,19 @@
                 console.log('Mammoth warnings:', result.messages);
               }
             }).catch(function(err) {
-              console.error('Mammoth error:', err);
+              console.error('Mammoth extraction error:', err);
               setError('Failed to read Word document: ' + (err.message || 'Unknown error. Try saving your Word document as .txt instead.'));
               setProgress('');
             });
-          } catch (syncError) {
-            console.error('Mammoth sync error:', syncError);
-            setError('Failed to process Word document: ' + syncError.message);
+          };
+          
+          reader.onerror = function(err) {
+            console.error('File reading error:', err);
+            setError('Failed to read file. Try saving your Word document as .txt instead.');
             setProgress('');
-          }
+          };
+          
+          reader.readAsArrayBuffer(file);
         } else {
           // Handle .txt and .md files
           console.log('Processing text file...');
