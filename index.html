@@ -50,7 +50,7 @@
     // Text size presets
     const TEXT_PRESETS = {
       default: { bodySize: 10, lineHeight: 15, label: "Default (10pt/15pt)" },
-      lisa: { bodySize: 11, lineHeight: 16.5, label: "Lisa Style (11pt/16.5pt)" }
+      lisa: { bodySize: 11, lineHeight: 16.5, label: "Spacious (11pt/16.5pt)" }
     };
 
     // Create configurable SPEC object - will be updated based on selected preset
@@ -96,10 +96,11 @@
     };
 
     const APP_VERSION = {
-      version: "0.5.6",
+      version: "0.5.7",
       date: "2026-04-18",
       changes: [
-        "0.5.6 - Added body text size option. Toggle between Default (10pt/15pt) and Lisa Style (11pt/16.5pt). Drop cap auto-adjusts to maintain proper 3-line span.",
+        "0.5.7 - Fixed cramped dedication page layout (wider text area) and renamed text size option to 'Spacious' for better UI clarity.",
+        "0.5.6 - Added body text size option. Toggle between Default (10pt/15pt) and Spacious (11pt/16.5pt). Drop cap auto-adjusts to maintain proper 3-line span.",
         "0.5.5 - Added smart chapter title wrapping. Breaks titles at natural points (after prepositions, at punctuation) and avoids orphaning short words like 'The' or 'Of' at line ends.",
         "0.5.4 - Added widow/orphan control. Prevents short paragraph tails (1-2 lines) from appearing alone on new pages.",
         "0.5.3 - Drop cap now sized correctly to span 3 full body lines (~62pt font size instead of fixed 35pt). Drop cap's cap-height now fills the exact 3-line block it should occupy, matching InDesign's 'span N lines' behaviour.",
@@ -488,7 +489,7 @@
         doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(12);
         const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
         for (const para of dedLines) {
-          const wrapped = wrapText(para, getTextWidth() - 40, 12, "italic");
+          const wrapped = wrapText(para, getTextWidth() - 20, 12, "italic");
           for (const line of wrapped) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 18; }
           ty += 12;
         }
