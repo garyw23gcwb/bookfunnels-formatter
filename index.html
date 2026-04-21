@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.0",
-      date: "2026-04-18",
+      version: "0.7.1",
+      date: "2026-04-21",
       changes: [
+        "0.7.1 - Two fixes: (1) CTA page alignment - previously the title text centered on the absolute page midline while the black bars centered on the text-block midline, causing a ~12pt leftward offset of the title relative to the bars. All centered text (CTA, title page, copyright, dedication, TOC, chapter titles, epigraphs) now centers on the text block, which also corrects the same subtle offset everywhere else. CTA page content now also vertically centers on the page with a 60/40 upper bias so it reads balanced rather than top-heavy. (2) EPUB chapter break - 'Chapter 1' was landing alone on one page with its title on the next because both p.chapter-num and h1 had page-break-before. Fixed by moving the page break to whichever element opens the chapter (chapter-num when numbered, h1.chapter-opener when unnumbered) and adding page-break-after:avoid so the title stays with the number.",
         "0.7.0 - Major feature set: drop cap per-letter tuck-in table (L, T, I, F, J, P, Y no longer leave awkward right-side gaps); justified body text with ragged last line (industry standard); back-of-book reader bonus CTA page (same content as front, appears after final chapter on a fresh recto); docx H1/H2 structure preserved via mammoth convertToHtml with style map (H2 subheadings render as bold, oversized, with breathing room); EPUB 3.0 export for Apple Books, Kobo, Google Play, and KDP (Amazon converts EPUB to Kindle format server-side); JSZip added as dependency for EPUB packaging. Not yet done: full manuscript stress test is for you to run.",
         "0.6.7 - Primary button resting state now uses the deep brand blue (#4F5FD9) instead of mid-lavender. Previous version was too close to the disabled color and only read as active on hover, which felt broken.",
         "0.6.6 - Fixed primary button contrast. Enabled state now uses the stronger brand blue (#8B9BFF base, #4F5FD9 hover) with subtle shadow so the 'ready to proceed' state reads as unambiguously active. Disabled state remains pale lavender at 0.55 opacity. Also added proper native disabled attribute and aria-disabled for accessibility.",
@@ -426,6 +427,11 @@
       function getMargins() { return isRecto() ? SPEC.margins.recto : SPEC.margins.verso; }
       function getTextWidth() { const m = getMargins(); return SPEC.pageW - m.inside - m.outside; }
       function getTextX() { return getMargins().inside; }
+      // Horizontal center of the current page's text block. Use this for all centered
+      // text (chapter titles, TOC, title page, CTA, etc.) instead of SPEC.pageW / 2 —
+      // on bound books the text block is offset toward the outside edge because the
+      // spine-side gutter is larger, so centering on pageW/2 pushes text toward the spine.
+      function getCenterX() { const m = getMargins(); return m.inside + (SPEC.pageW - m.inside - m.outside) / 2; }
       
       // Helper function to reset font properties after page breaks
       function resetBodyFont() {
@@ -553,50 +559,90 @@
       // Renders a single reader-bonus CTA page on the current page. Used at both front
       // (before title page) and back (after final chapter) of the book. Same copy, same
       // layout, rendered twice so readers have two chances to convert.
+      //
+      // Layout strategy:
+      //  1. Measure every element's height (both bars, title lines, body lines)
+      //  2. Sum total content height
+      //  3. Start y so the block sits optically centered on the page (slight upper bias)
+      //  4. Horizontal center uses the text-block midline (textX + textW/2), which on
+      //     verso/recto differs from the absolute page center. Drawing everything against
+      //     the text block keeps the bars and the centered text visually aligned.
       function renderCTAPage() {
-        let y = 60;
+        const textX = getTextX();
+        const textW = getTextWidth();
+        const centerX = textX + textW / 2;
+
+        // Constants for the layout
+        const HEADER_BAR_H = 40;
+        const TITLE_SIZE = 28;
+        const TITLE_LINE_H = 35;
+        const BODY_SIZE = 14;
+        const BODY_LINE_H = 18;
+        const URL_BAR_H = 40;
+        const GAP_HEADER_TO_TITLE = 30;
+        const GAP_TITLE_TO_BODY = 30;
+        const GAP_BODY_TO_URL = 40;
+
+        // Measure title lines
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
+        const ctaLines = wrapTitle(bookData.ctaTitle || "", textW - 40, TITLE_SIZE);
+
+        // Measure body lines
+        let bodyLines = [];
+        if (bookData.ctaBody) {
+          bodyLines = wrapText(bookData.ctaBody, textW - 60, BODY_SIZE);
+        }
+
+        // Total content height, with gaps only between blocks that actually exist
+        let totalH = HEADER_BAR_H + GAP_HEADER_TO_TITLE;
+        totalH += ctaLines.length * TITLE_LINE_H;
+        if (bodyLines.length > 0) totalH += GAP_TITLE_TO_BODY + (bodyLines.length * BODY_LINE_H);
+        if (bookData.ctaUrl) totalH += GAP_BODY_TO_URL + URL_BAR_H;
+
+        // Center the whole block vertically with a slight upper bias (65/35 split) so
+        // it reads as balanced rather than mathematically dead-centered.
+        const availableH = SPEC.pageH;
+        let y = Math.max(60, (availableH - totalH) * 0.40);
 
         // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
-        doc.rect(getTextX(), y, getTextWidth(), 40, "F");
+        doc.rect(textX, y, textW, HEADER_BAR_H, "F");
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(255);
-        doc.text("READER BONUS", SPEC.pageW / 2, y + 27, { align: "center" });
+        doc.text("READER BONUS", centerX, y + 27, { align: "center" });
         doc.setTextColor(30);
-        y += 70;
+        y += HEADER_BAR_H + GAP_HEADER_TO_TITLE;
 
-        // Main title with proper text wrapping
-        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28);
-        const ctaLines = wrapTitle(bookData.ctaTitle, getTextWidth() - 40, 28);
+        // Main title
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
         for (const line of ctaLines) {
-          doc.text(line, SPEC.pageW / 2, y, { align: "center" });
-          y += 35;
+          doc.text(line, centerX, y, { align: "center" });
+          y += TITLE_LINE_H;
         }
-        y += 30;
 
         // Description text
-        if (bookData.ctaBody) {
-          const lines = wrapText(bookData.ctaBody, getTextWidth() - 60, 14);
-          doc.setFontSize(14); doc.setFont(BODY_FONT, "normal");
-          for (const line of lines) {
-            doc.text(line, SPEC.pageW / 2, y, { align: "center" });
-            y += 18;
+        if (bodyLines.length > 0) {
+          y += GAP_TITLE_TO_BODY;
+          doc.setFontSize(BODY_SIZE); doc.setFont(BODY_FONT, "normal");
+          for (const line of bodyLines) {
+            doc.text(line, centerX, y, { align: "center" });
+            y += BODY_LINE_H;
           }
         }
-        y += 40;
 
-        // URL in black bar at bottom. Auto-fit so long URLs never overflow.
+        // URL in black bar
         if (bookData.ctaUrl) {
+          y += GAP_BODY_TO_URL;
           doc.setFillColor(30, 30, 30);
-          doc.rect(getTextX(), y, getTextWidth(), 40, "F");
+          doc.rect(textX, y, textW, URL_BAR_H, "F");
           doc.setFont(BODY_FONT, "normal"); doc.setTextColor(255);
-          const maxUrlWidth = getTextWidth() - 32;
+          const maxUrlWidth = textW - 32;
           let urlSize = 16;
           doc.setFontSize(urlSize);
           while (doc.getTextWidth(bookData.ctaUrl) > maxUrlWidth && urlSize > 9) {
             urlSize -= 0.5;
             doc.setFontSize(urlSize);
           }
-          doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 27, { align: "center" });
+          doc.text(bookData.ctaUrl, centerX, y + 27, { align: "center" });
           doc.setTextColor(30);
         }
       }
@@ -615,27 +661,27 @@
       let ty = 140;
       doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28); doc.setTextColor(30);
       const titleLines = wrapText(bookData.title, getTextWidth(), 28, "bold");
-      for (const line of titleLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 35; }
+      for (const line of titleLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 35; }
       ty += 10; doc.setDrawColor(30); doc.setLineWidth(0.5);
-      doc.line(SPEC.pageW / 2 - 80, ty, SPEC.pageW / 2 + 80, ty); ty += 25;
+      doc.line(getCenterX() - 80, ty, getCenterX() + 80, ty); ty += 25;
       if (bookData.subtitle) {
         doc.setFont(BODY_FONT, "normal"); doc.setFontSize(16);
         const subLines = wrapText(bookData.subtitle, getTextWidth(), 16);
-        for (const line of subLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 22; }
+        for (const line of subLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 22; }
       }
       ty = 430; doc.setFont(BODY_FONT, "bold"); doc.setFontSize(14);
-      doc.text(bookData.author.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" });
+      doc.text(bookData.author.toUpperCase(), getCenterX(), ty, { align: "center" });
 
       newPage();
       // Copyright page: start block around 35% down the page so the text sits in the upper
       // middle of the page, which is the standard placement for a copyright/imprint page.
       ty = 200; doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
-      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), SPEC.pageW / 2, ty, { align: "center" }); ty += 20; }
-      doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, SPEC.pageW / 2, ty, { align: "center" }); ty += 18;
+      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
+      doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, getCenterX(), ty, { align: "center" }); ty += 18;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
       const copLines = wrapText(copyrightText, getTextWidth() - 40, 9);
-      for (const line of copLines) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 13; }
-      if (bookData.isbn) { ty += 10; doc.text("ISBN: " + bookData.isbn, SPEC.pageW / 2, ty, { align: "center" }); }
+      for (const line of copLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 13; }
+      if (bookData.isbn) { ty += 10; doc.text("ISBN: " + bookData.isbn, getCenterX(), ty, { align: "center" }); }
       doc.setTextColor(30);
 
       if (bookData.dedication) {
@@ -644,7 +690,7 @@
         const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
         for (const para of dedLines) {
           const wrapped = wrapText(para, getTextWidth() - 20, 10, "italic");
-          for (const line of wrapped) { doc.text(line, SPEC.pageW / 2, ty, { align: "center" }); ty += 16; }
+          for (const line of wrapped) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 16; }
           ty += 10;
         }
         newPage();
@@ -780,7 +826,7 @@
       onProgress("Building table of contents...");
       newPage(); ty = 60;
       doc.setFont(BODY_FONT, "bold"); doc.setFontSize(22); doc.setTextColor(30);
-      doc.text("Contents", SPEC.pageW / 2, ty, { align: "center" }); ty += 50;
+      doc.text("Contents", getCenterX(), ty, { align: "center" }); ty += 50;
 
       const tocTextX = getTextX();
       const tocTextW = getTextWidth();
@@ -867,7 +913,7 @@
         // across numbered chapters and named sections.
         if (ch.num) {
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.chapterNumSize); doc.setTextColor(30);
-          doc.text(ch.num, SPEC.pageW / 2, y, { align: "center" });
+          doc.text(ch.num, getCenterX(), y, { align: "center" });
           y += 45;
         } else {
           y += 45;
@@ -876,7 +922,7 @@
         // Chapter title
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
-        for (const line of titleWrapped) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 28; }
+        for (const line of titleWrapped) { doc.text(line, getCenterX(), y, { align: "center" }); y += 28; }
         y += 35;
 
         // Epigraph
@@ -884,11 +930,11 @@
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
           const epText = "\u201C" + ch.epigraph + "\u201D";
           const epLines = wrapText(epText, textW - 60, 14, "italic");
-          for (const line of epLines) { doc.text(line, SPEC.pageW / 2, y, { align: "center" }); y += 20; }
+          for (const line of epLines) { doc.text(line, getCenterX(), y, { align: "center" }); y += 20; }
           if (ch.epigraphAttribution) { 
             y += 5; 
             doc.setFontSize(12); 
-            doc.text("\u2013 " + ch.epigraphAttribution, SPEC.pageW / 2, y, { align: "center" }); 
+            doc.text("\u2013 " + ch.epigraphAttribution, getCenterX(), y, { align: "center" }); 
             y += 15; 
           }
           y += 30;
@@ -1103,19 +1149,26 @@
       const css = [
         '@charset "UTF-8";',
         'body { font-family: Georgia, "Times New Roman", serif; line-height: 1.55; margin: 0 4%; color: #111; }',
-        'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-before: always; }',
-        'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; }',
+        // IMPORTANT: h1 does NOT force a page break by itself. The page break is forced
+        // by whichever element opens the chapter (chapter-num when present, h1 otherwise).
+        // This prevents "Chapter 1" landing on one page and its title on the next.
+        'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-after: avoid; break-after: avoid; }',
+        'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; page-break-after: avoid; break-after: avoid; }',
         'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
         'p.epigraph { font-style: italic; margin: 1.5em 2em; text-align: center; }',
         'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
-        'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; }',
+        // chapter-num opens a new page; h1 that follows stays on the same page as the number.
+        'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
+        // When there is no chapter-num (named section), h1 is the page opener. A dedicated
+        // class handles this case so we do not put page-break-before on every h1.
+        'h1.chapter-opener { page-break-before: always; break-before: page; }',
         'p.dedication { font-style: italic; text-align: center; margin: 1em 2em; }',
         'p.copyright { font-size: 0.85em; text-align: center; margin: 0.3em 0; }',
-        'div.title-page { text-align: center; margin-top: 5em; }',
-        'div.title-page h1 { font-size: 2.4em; page-break-before: auto; }',
+        'div.title-page { text-align: center; margin-top: 5em; page-break-before: always; break-before: page; }',
+        'div.title-page h1 { font-size: 2.4em; page-break-before: auto; break-before: auto; }',
         'div.title-page .subtitle { font-style: italic; font-size: 1.2em; margin: 1em 2em; }',
         'div.title-page .author { font-weight: bold; margin-top: 3em; letter-spacing: 0.1em; text-transform: uppercase; }',
-        'div.cta-page { text-align: center; margin: 3em 0; page-break-before: always; }',
+        'div.cta-page { text-align: center; margin: 3em 0; page-break-before: always; break-before: page; }',
         'div.cta-page .cta-banner { background: #111; color: #fff; padding: 0.8em; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 2em; }',
         'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; }',
         'div.cta-page .cta-body { font-size: 1.05em; margin: 2em 10%; }',
@@ -1194,8 +1247,15 @@
       for (let ci = 0; ci < chapters.length; ci++) {
         const ch = chapters[ci];
         let body = '';
-        if (ch.num) body += '  <p class="chapter-num">' + esc(ch.num) + '</p>\n';
-        body += '  <h1>' + esc(ch.title || ch.num || "Chapter " + (ci + 1)) + '</h1>\n';
+        // Page break: forced on whichever element opens the chapter.
+        // - If ch.num is present, chapter-num.p gets the break, h1 follows on same page.
+        // - If only h1 is present (unnumbered section), h1 gets the "chapter-opener" class.
+        if (ch.num) {
+          body += '  <p class="chapter-num">' + esc(ch.num) + '</p>\n';
+          body += '  <h1>' + esc(ch.title || "Chapter " + (ci + 1)) + '</h1>\n';
+        } else {
+          body += '  <h1 class="chapter-opener">' + esc(ch.title || "Chapter " + (ci + 1)) + '</h1>\n';
+        }
         if (ch.epigraph) {
           body += '  <p class="epigraph">\u201C' + esc(ch.epigraph) + '\u201D</p>\n';
           if (ch.epigraphAttribution) body += '  <p class="epigraph-attribution">\u2013 ' + esc(ch.epigraphAttribution) + '</p>\n';
