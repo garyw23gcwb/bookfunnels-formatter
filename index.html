@@ -6,6 +6,7 @@
   <title>Tinybook Formatter - bookfunnels.io</title>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -97,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.7",
+      version: "0.7.0",
       date: "2026-04-18",
       changes: [
+        "0.7.0 - Major feature set: drop cap per-letter tuck-in table (L, T, I, F, J, P, Y no longer leave awkward right-side gaps); justified body text with ragged last line (industry standard); back-of-book reader bonus CTA page (same content as front, appears after final chapter on a fresh recto); docx H1/H2 structure preserved via mammoth convertToHtml with style map (H2 subheadings render as bold, oversized, with breathing room); EPUB 3.0 export for Apple Books, Kobo, Google Play, and KDP (Amazon converts EPUB to Kindle format server-side); JSZip added as dependency for EPUB packaging. Not yet done: full manuscript stress test is for you to run.",
         "0.6.7 - Primary button resting state now uses the deep brand blue (#4F5FD9) instead of mid-lavender. Previous version was too close to the disabled color and only read as active on hover, which felt broken.",
         "0.6.6 - Fixed primary button contrast. Enabled state now uses the stronger brand blue (#8B9BFF base, #4F5FD9 hover) with subtle shadow so the 'ready to proceed' state reads as unambiguously active. Disabled state remains pale lavender at 0.55 opacity. Also added proper native disabled attribute and aria-disabled for accessibility.",
         "0.6.5 - Smart quotes conversion for all user text (titles, body, epigraphs, dedication, copyright). URL on reader bonus page auto-fits inside black bar. TOC no longer truncates titles when page numbers are single digits. Copyright page moved up from 59% to ~35% down. Section pages without chapter numbers now align to the same title baseline as numbered chapters. TOC dot leaders use consistent spacing right-aligned to page number column.",
@@ -129,6 +131,49 @@
         "0.1.0 - Initial prototype",
       ]
     };
+
+    // Convert mammoth HTML output to a plain-text form the chapter detector understands.
+    // Strategy: use a DOM parser to traverse nodes, emitting:
+    //   h1 -> "TITLE\n\n"                          (detected as chapter heading)
+    //   h2 -> "## TITLE\n\n"                       (marked so render can style it)
+    //   p  -> "TEXT\n\n"                            (normal paragraph)
+    //   br -> "\n"
+    //   all other tags -> inner text only (strip bold/italic/underline to plain)
+    function flattenDocxHtml(html) {
+      const parser = new DOMParser();
+      const docHtml = parser.parseFromString("<div id='_root'>" + html + "</div>", "text/html");
+      const root = docHtml.getElementById("_root");
+      if (!root) return "";
+
+      function getText(node) {
+        let out = "";
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) { // text node
+            out += child.textContent;
+          } else if (child.nodeType === 1) { // element
+            if (child.tagName === "BR") { out += "\n"; }
+            else { out += getText(child); }
+          }
+        }
+        return out;
+      }
+
+      const parts = [];
+      for (const node of root.childNodes) {
+        if (node.nodeType !== 1) continue;
+        const tag = node.tagName;
+        const text = getText(node).trim();
+        if (!text) continue;
+        if (tag === "H1") {
+          parts.push(text);
+        } else if (tag === "H2") {
+          parts.push("## " + text);
+        } else {
+          parts.push(text);
+        }
+      }
+      return parts.join("\n\n").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
 
     // Convert straight ASCII quotes and apostrophes to typographic curly equivalents.
     // Runs on every string that will be rendered into the PDF (titles, body, epigraphs,
@@ -161,6 +206,25 @@
         return out;
       }
       return obj;
+    }
+
+    // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
+    // width. Narrow/asymmetric capitals (L, T, I, F, J, P, Y) have significant empty
+    // space on their right side that body text can tuck into without touching the glyph.
+    // Full-width capitals (M, W, O, etc.) have no tuckable negative space.
+    // Values are tuned for Gelasio bold at display size and scale proportionally with it.
+    const DROP_CAP_TUCK = {
+      A: 0.05, B: 0.00, C: 0.00, D: 0.00, E: 0.00,
+      F: 0.22, G: 0.00, H: 0.00, I: 0.00, J: 0.15,
+      K: 0.05, L: 0.45, M: 0.00, N: 0.00, O: 0.00,
+      P: 0.20, Q: 0.00, R: 0.00, S: 0.00, T: 0.25,
+      U: 0.00, V: 0.05, W: 0.00, X: 0.05, Y: 0.15,
+      Z: 0.00,
+    };
+
+    function dropCapTuckedWidth(rawWidth, letter) {
+      const frac = DROP_CAP_TUCK[letter] != null ? DROP_CAP_TUCK[letter] : 0;
+      return rawWidth * (1 - frac);
     }
 
     function detectChapters(text) {
@@ -486,48 +550,46 @@
         return doc.splitTextToSize(title, maxWidth);
       }
 
-      onProgress("Generating front matter...");
-      newPage(); newPage();
-
-      if (bookData.ctaTitle) {
-        newPage();
+      // Renders a single reader-bonus CTA page on the current page. Used at both front
+      // (before title page) and back (after final chapter) of the book. Same copy, same
+      // layout, rendered twice so readers have two chances to convert.
+      function renderCTAPage() {
         let y = 60;
-        
+
         // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
         doc.rect(getTextX(), y, getTextWidth(), 40, "F");
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(255);
         doc.text("READER BONUS", SPEC.pageW / 2, y + 27, { align: "center" });
-        doc.setTextColor(30); 
+        doc.setTextColor(30);
         y += 70;
-        
+
         // Main title with proper text wrapping
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28);
         const ctaLines = wrapTitle(bookData.ctaTitle, getTextWidth() - 40, 28);
-        for (const line of ctaLines) { 
-          doc.text(line, SPEC.pageW / 2, y, { align: "center" }); 
-          y += 35; 
+        for (const line of ctaLines) {
+          doc.text(line, SPEC.pageW / 2, y, { align: "center" });
+          y += 35;
         }
         y += 30;
-        
-        // Description text with proper wrapping and spacing
+
+        // Description text
         if (bookData.ctaBody) {
           const lines = wrapText(bookData.ctaBody, getTextWidth() - 60, 14);
           doc.setFontSize(14); doc.setFont(BODY_FONT, "normal");
-          for (const line of lines) { 
-            doc.text(line, SPEC.pageW / 2, y, { align: "center" }); 
-            y += 18; 
+          for (const line of lines) {
+            doc.text(line, SPEC.pageW / 2, y, { align: "center" });
+            y += 18;
           }
         }
         y += 40;
-        
-        // URL in black bar at bottom. Auto-fit: measure the URL at 16pt and step down
-        // until it fits inside the bar with a comfortable 16pt side padding on each side.
+
+        // URL in black bar at bottom. Auto-fit so long URLs never overflow.
         if (bookData.ctaUrl) {
           doc.setFillColor(30, 30, 30);
           doc.rect(getTextX(), y, getTextWidth(), 40, "F");
           doc.setFont(BODY_FONT, "normal"); doc.setTextColor(255);
-          const maxUrlWidth = getTextWidth() - 32; // 16pt padding each side
+          const maxUrlWidth = getTextWidth() - 32;
           let urlSize = 16;
           doc.setFontSize(urlSize);
           while (doc.getTextWidth(bookData.ctaUrl) > maxUrlWidth && urlSize > 9) {
@@ -537,6 +599,15 @@
           doc.text(bookData.ctaUrl, SPEC.pageW / 2, y + 27, { align: "center" });
           doc.setTextColor(30);
         }
+      }
+
+      onProgress("Generating front matter...");
+      newPage(); newPage();
+
+      // FRONT CTA: before title page
+      if (bookData.ctaTitle) {
+        newPage();
+        renderCTAPage();
         newPage();
       }
 
@@ -597,9 +668,12 @@
         for (let pi = 0; pi < paragraphs.length; pi++) {
           const para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
-            // Drop cap takes ~3 lines at the narrow width, then continues at full width
+            // Drop cap takes ~3 lines at the narrow width, then continues at full width.
+            // Must mirror the render path exactly so TOC page numbers stay accurate.
+            const dropLetter = para[0].toUpperCase();
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(getDropCapSize());
-            const dropCapWidth = doc.getTextWidth(para[0].toUpperCase()) + 5;
+            const rawDropCapWidth = doc.getTextWidth(dropLetter);
+            const dropCapWidth = dropCapTuckedWidth(rawDropCapWidth, dropLetter) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
             let remaining = para.slice(1);
@@ -618,6 +692,24 @@
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
+
+          // Subheading marker in dry-run: mirror the render path so TOC stays accurate.
+          if (para.startsWith("## ")) {
+            const subText = para.slice(3).trim();
+            const subSize = SPEC.bodySize + 3;
+            const subLineHeight = subSize * 1.35;
+            y += SPEC.paraGap * 2;
+            doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+            const subLines = doc.splitTextToSize(subText, textW);
+            const needed = subLines.length * subLineHeight + (SPEC.lineHeight * 2);
+            if (y + needed > maxY) {
+              pages++; y = SPEC.margins.recto.top + 30;
+            }
+            for (const _s of subLines) { y += subLineHeight; }
+            y += 4;
+            continue;
+          }
+
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
           const lines = doc.splitTextToSize(para, textW);
           
@@ -834,7 +926,9 @@
             // making the drop cap visually occupy the full 3-line block.
             const dropCapSize = getDropCapSize();
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(dropCapSize); doc.setTextColor(30);
-            const dropCapWidth = doc.getTextWidth(dropLetter) + 5;
+            const rawDropCapWidth = doc.getTextWidth(dropLetter);
+            // Apply per-letter tuck so narrow/asymmetric caps don't leave awkward gaps.
+            const dropCapWidth = dropCapTuckedWidth(rawDropCapWidth, dropLetter) + 5;
             const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * SPEC.capHeightRatio);
             const dropCapBaseline = firstLineCapTop + (dropCapSize * SPEC.capHeightRatio);
             doc.text(dropLetter, textX, dropCapBaseline);
@@ -845,11 +939,22 @@
             const narrowWidth = textW - dropCapWidth - 5;
             let remainingText = restText;
             let lineCount = 0;
+            // Track whether the drop cap block will be followed by more full-width lines.
+            // If yes, narrow lines are all "interior" lines (justify). If no, the final
+            // narrow line is the paragraph's last line and should NOT be justified.
             while (lineCount < SPEC.dropCapLines && remainingText.length > 0) {
               const narrowLines = wrapText(remainingText, narrowWidth, SPEC.bodySize);
               if (narrowLines.length > 0) {
-                doc.text(narrowLines[0], textX + dropCapWidth, y + BASELINE_OFFSET);
-                remainingText = remainingText.slice(narrowLines[0].length).trim();
+                const lineText = narrowLines[0];
+                const sliced = remainingText.slice(lineText.length).trim();
+                // Last line of paragraph if there's nothing left AND no remaining text after drop cap block
+                const isLastLineOfPara = sliced.length === 0;
+                if (isLastLineOfPara) {
+                  doc.text(lineText, textX + dropCapWidth, y + BASELINE_OFFSET);
+                } else {
+                  doc.text(lineText, textX + dropCapWidth, y + BASELINE_OFFSET, { align: "justify", maxWidth: narrowWidth });
+                }
+                remainingText = sliced;
                 y += SPEC.lineHeight; lineCount++;
               } else break;
             }
@@ -857,13 +962,47 @@
               // Add a small gap between drop cap section and remaining text
               y += 3;
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
-              for (const line of fullLines) {
+              for (let li = 0; li < fullLines.length; li++) {
                 if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; resetBodyFont(); }
-                doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
+                const isLastLine = li === fullLines.length - 1;
+                if (isLastLine) {
+                  doc.text(fullLines[li], textX, y + BASELINE_OFFSET);
+                } else {
+                  doc.text(fullLines[li], textX, y + BASELINE_OFFSET, { align: "justify", maxWidth: textW });
+                }
+                y += SPEC.lineHeight;
               }
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
+
+          // Subheading marker: paragraphs starting with "## " are H2s from the docx
+          // converter (or anyone who wrote them in that style). Render as bold, one
+          // size up, with a larger gap above so they break up the chapter visually.
+          if (para.startsWith("## ")) {
+            const subText = para.slice(3).trim();
+            const subSize = SPEC.bodySize + 3;
+            const subLineHeight = subSize * 1.35;
+            y += SPEC.paraGap * 2; // extra breathing room above
+            doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize); doc.setTextColor(30);
+            const subLines = doc.splitTextToSize(subText, textW);
+            // Keep subheading with at least 2 lines of following body (avoid orphaning)
+            const needed = subLines.length * subLineHeight + (SPEC.lineHeight * 2);
+            if (y + needed > maxY) {
+              newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
+              addPageNumber(bookPageNum + pagesUsed);
+              y = getMargins().top + 30; resetBodyFont();
+              doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+            }
+            for (const sline of subLines) {
+              doc.text(sline, textX, y + subSize * 0.8);
+              y += subLineHeight;
+            }
+            y += 4;
+            resetBodyFont();
+            continue;
+          }
+
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
           const lines = wrapText(para, textW, SPEC.bodySize);
           
@@ -901,17 +1040,238 @@
             }
           }
           
-          // Render all lines of the paragraph
-          for (const line of lines) {
-            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; }
-            doc.text(line, textX, y + BASELINE_OFFSET); y += SPEC.lineHeight;
+          // Render all lines of the paragraph. Each line except the last is justified to
+          // the full text width; the last line stays left-aligned (ragged right) per
+          // industry convention so end-of-paragraph stretching doesn't leave awkward gaps.
+          for (let li = 0; li < lines.length; li++) {
+            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; resetBodyFont(); }
+            const isLastLine = li === lines.length - 1;
+            if (isLastLine) {
+              doc.text(lines[li], textX, y + BASELINE_OFFSET);
+            } else {
+              doc.text(lines[li], textX, y + BASELINE_OFFSET, { align: "justify", maxWidth: textW });
+            }
+            y += SPEC.lineHeight;
           }
           y += SPEC.paraGap;
         }
       }
 
+      // BACK CTA: one more pass at the end of the book, on a fresh recto if possible
+      // so it doesn't sit on the reverse of a chapter end. Same content as the front CTA.
+      if (bookData.ctaTitle) {
+        if (!isRecto()) newPage();
+        newPage();
+        renderCTAPage();
+      }
+
       onProgress("Finalizing PDF...");
       return doc.output("blob");
+    }
+
+    // EPUB 3.0 generator. Produces a valid .epub zip that KDP, Apple Books, Kobo, and
+    // Google Play all accept. Reflowable text (no fixed layout) since this is prose.
+    async function generateEPUB(bookData, chapters, onProgress) {
+      onProgress("Preparing EPUB...");
+
+      if (typeof JSZip === "undefined") {
+        throw new Error("JSZip not loaded. Please refresh the page.");
+      }
+
+      // Run smart quotes on all user text (same as PDF path)
+      const ctaUrlOriginal = bookData && bookData.ctaUrl ? bookData.ctaUrl : "";
+      bookData = smartQuotesDeep(bookData);
+      if (bookData) bookData.ctaUrl = ctaUrlOriginal;
+      chapters = smartQuotesDeep(chapters);
+
+      const zip = new JSZip();
+
+      // 1. mimetype file MUST be first and uncompressed
+      zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+
+      // 2. META-INF/container.xml - points to the OPF
+      zip.folder("META-INF").file("container.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n' +
+        '  <rootfiles>\n' +
+        '    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>\n' +
+        '  </rootfiles>\n' +
+        '</container>'
+      );
+
+      // 3. Stylesheet
+      const css = [
+        '@charset "UTF-8";',
+        'body { font-family: Georgia, "Times New Roman", serif; line-height: 1.55; margin: 0 4%; color: #111; }',
+        'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-before: always; }',
+        'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; }',
+        'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
+        'p.epigraph { font-style: italic; margin: 1.5em 2em; text-align: center; }',
+        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
+        'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; }',
+        'p.dedication { font-style: italic; text-align: center; margin: 1em 2em; }',
+        'p.copyright { font-size: 0.85em; text-align: center; margin: 0.3em 0; }',
+        'div.title-page { text-align: center; margin-top: 5em; }',
+        'div.title-page h1 { font-size: 2.4em; page-break-before: auto; }',
+        'div.title-page .subtitle { font-style: italic; font-size: 1.2em; margin: 1em 2em; }',
+        'div.title-page .author { font-weight: bold; margin-top: 3em; letter-spacing: 0.1em; text-transform: uppercase; }',
+        'div.cta-page { text-align: center; margin: 3em 0; page-break-before: always; }',
+        'div.cta-page .cta-banner { background: #111; color: #fff; padding: 0.8em; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 2em; }',
+        'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; }',
+        'div.cta-page .cta-body { font-size: 1.05em; margin: 2em 10%; }',
+        'div.cta-page .cta-url { background: #111; color: #fff; padding: 0.8em; margin: 2em 0; font-weight: bold; word-break: break-all; }',
+      ].join("\n");
+
+      const oebps = zip.folder("OEBPS");
+      oebps.file("styles.css", css);
+
+      // 4. Helpers
+      function esc(s) {
+        if (s == null) return "";
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+      function xhtmlDoc(title, bodyContent) {
+        return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<!DOCTYPE html>\n' +
+          '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">\n' +
+          '<head>\n' +
+          '  <meta charset="UTF-8"/>\n' +
+          '  <title>' + esc(title) + '</title>\n' +
+          '  <link rel="stylesheet" type="text/css" href="styles.css"/>\n' +
+          '</head>\n' +
+          '<body>\n' + bodyContent + '\n</body>\n</html>';
+      }
+
+      // 5. Title page
+      let titlePageBody = '<div class="title-page">\n';
+      titlePageBody += '  <h1>' + esc(bookData.title) + '</h1>\n';
+      if (bookData.subtitle) titlePageBody += '  <p class="subtitle">' + esc(bookData.subtitle) + '</p>\n';
+      titlePageBody += '  <p class="author">' + esc(bookData.author) + '</p>\n';
+      titlePageBody += '</div>';
+      oebps.file("titlepage.xhtml", xhtmlDoc(bookData.title || "Title", titlePageBody));
+
+      // 6. Copyright page
+      let copyBody = '<div>\n';
+      if (bookData.publisher) copyBody += '  <p class="copyright">PUBLISHED BY ' + esc(bookData.publisher.toUpperCase()) + '</p>\n';
+      copyBody += '  <p class="copyright">Copyright \u00A9 ' + new Date().getFullYear() + ' by ' + esc(bookData.author) + '</p>\n';
+      const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
+      copyBody += '  <p class="copyright">' + esc(copyrightText) + '</p>\n';
+      if (bookData.isbn) copyBody += '  <p class="copyright">ISBN: ' + esc(bookData.isbn) + '</p>\n';
+      copyBody += '</div>';
+      oebps.file("copyright.xhtml", xhtmlDoc("Copyright", copyBody));
+
+      // 7. Dedication
+      let dedFile = null;
+      if (bookData.dedication) {
+        const dedParas = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
+        let dedBody = '<div>\n';
+        for (const p of dedParas) dedBody += '  <p class="dedication">' + esc(p) + '</p>\n';
+        dedBody += '</div>';
+        oebps.file("dedication.xhtml", xhtmlDoc("Dedication", dedBody));
+        dedFile = "dedication.xhtml";
+      }
+
+      // 8. Reader bonus CTA pages (front + back)
+      let ctaFile = null;
+      if (bookData.ctaTitle) {
+        let ctaBody = '<div class="cta-page">\n';
+        ctaBody += '  <div class="cta-banner">READER BONUS</div>\n';
+        ctaBody += '  <p class="cta-title">' + esc(bookData.ctaTitle) + '</p>\n';
+        if (bookData.ctaBody) ctaBody += '  <p class="cta-body">' + esc(bookData.ctaBody) + '</p>\n';
+        if (bookData.ctaUrl) ctaBody += '  <div class="cta-url">' + esc(bookData.ctaUrl) + '</div>\n';
+        ctaBody += '</div>';
+        oebps.file("cta-front.xhtml", xhtmlDoc("Reader Bonus", ctaBody));
+        oebps.file("cta-back.xhtml", xhtmlDoc("Reader Bonus", ctaBody));
+        ctaFile = true;
+      }
+
+      // 9. Chapters - one XHTML file each. Preserve subheadings (## marker) as <h2>.
+      const chapterFiles = [];
+      for (let ci = 0; ci < chapters.length; ci++) {
+        const ch = chapters[ci];
+        let body = '';
+        if (ch.num) body += '  <p class="chapter-num">' + esc(ch.num) + '</p>\n';
+        body += '  <h1>' + esc(ch.title || ch.num || "Chapter " + (ci + 1)) + '</h1>\n';
+        if (ch.epigraph) {
+          body += '  <p class="epigraph">\u201C' + esc(ch.epigraph) + '\u201D</p>\n';
+          if (ch.epigraphAttribution) body += '  <p class="epigraph-attribution">\u2013 ' + esc(ch.epigraphAttribution) + '</p>\n';
+        }
+        const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        for (const p of paragraphs) {
+          if (p.startsWith("## ")) body += '  <h2>' + esc(p.slice(3).trim()) + '</h2>\n';
+          else body += '  <p>' + esc(p) + '</p>\n';
+        }
+        const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
+        oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
+        chapterFiles.push({ file: fname, title: ch.title || ch.num || ("Chapter " + (ci + 1)) });
+      }
+
+      // 10. Navigation document (EPUB 3 requires this)
+      let navBody = '<nav epub:type="toc" id="toc">\n  <h1>Contents</h1>\n  <ol>\n';
+      for (const cf of chapterFiles) {
+        navBody += '    <li><a href="' + cf.file + '">' + esc(cf.title) + '</a></li>\n';
+      }
+      navBody += '  </ol>\n</nav>';
+      oebps.file("nav.xhtml", xhtmlDoc("Contents", navBody));
+
+      // 11. Manifest + spine (content.opf)
+      const uuid = "urn:uuid:" + 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
+
+      const manifestItems = [
+        '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        '    <item id="css" href="styles.css" media-type="text/css"/>',
+        '    <item id="titlepage" href="titlepage.xhtml" media-type="application/xhtml+xml"/>',
+        '    <item id="copyright" href="copyright.xhtml" media-type="application/xhtml+xml"/>',
+      ];
+      const spineItems = [
+        '    <itemref idref="titlepage"/>',
+        '    <itemref idref="copyright"/>',
+      ];
+      if (ctaFile) {
+        manifestItems.push('    <item id="cta-front" href="cta-front.xhtml" media-type="application/xhtml+xml"/>');
+        spineItems.unshift('    <itemref idref="cta-front"/>'); // front CTA before title
+      }
+      if (dedFile) {
+        manifestItems.push('    <item id="dedication" href="dedication.xhtml" media-type="application/xhtml+xml"/>');
+        spineItems.push('    <itemref idref="dedication"/>');
+      }
+      spineItems.push('    <itemref idref="nav"/>'); // TOC after front matter
+      for (let ci = 0; ci < chapterFiles.length; ci++) {
+        const id = "ch" + (ci + 1);
+        manifestItems.push('    <item id="' + id + '" href="' + chapterFiles[ci].file + '" media-type="application/xhtml+xml"/>');
+        spineItems.push('    <itemref idref="' + id + '"/>');
+      }
+      if (ctaFile) {
+        manifestItems.push('    <item id="cta-back" href="cta-back.xhtml" media-type="application/xhtml+xml"/>');
+        spineItems.push('    <itemref idref="cta-back"/>');
+      }
+
+      const opf = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xml:lang="en">\n' +
+        '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n' +
+        '    <dc:identifier id="pub-id">' + uuid + '</dc:identifier>\n' +
+        '    <dc:title>' + esc(bookData.title) + '</dc:title>\n' +
+        '    <dc:creator>' + esc(bookData.author) + '</dc:creator>\n' +
+        '    <dc:language>en</dc:language>\n' +
+        (bookData.publisher ? '    <dc:publisher>' + esc(bookData.publisher) + '</dc:publisher>\n' : '') +
+        (bookData.isbn ? '    <dc:identifier>urn:isbn:' + esc(bookData.isbn) + '</dc:identifier>\n' : '') +
+        '    <meta property="dcterms:modified">' + new Date().toISOString().replace(/\.\d+Z$/, "Z") + '</meta>\n' +
+        '  </metadata>\n' +
+        '  <manifest>\n' + manifestItems.join("\n") + '\n  </manifest>\n' +
+        '  <spine>\n' + spineItems.join("\n") + '\n  </spine>\n' +
+        '</package>';
+      oebps.file("content.opf", opf);
+
+      onProgress("Packaging EPUB...");
+      const blob = await zip.generateAsync({ type: "blob", mimeType: "application/epub+zip" });
+      return blob;
     }
 
     /* ---- UI Components ---- */
@@ -1073,6 +1433,7 @@
       const [progress, setProgress] = useState("");
       const [error, setError] = useState("");
       const [pdfUrl, setPdfUrl] = useState(null);
+      const [epubUrl, setEpubUrl] = useState(null);
       const [textSizePreset, setTextSizePreset] = useState('default');
       const [bookData, setBookData] = useState({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
       const [rawText, setRawText] = useState("");
@@ -1138,6 +1499,21 @@
         }
       };
 
+      const handleGenerateEpub = async function() {
+        setGenerating(true); setProgress("Starting..."); setError("");
+        try {
+          const blob = await generateEPUB(bookData, chapters, setProgress);
+          if (!blob || blob.size === 0) { setError("EPUB generation produced an empty file."); return; }
+          setEpubUrl(URL.createObjectURL(blob));
+          setStep(4);
+        } catch (err) {
+          console.error("EPUB generation error:", err);
+          setError("EPUB generation failed: " + (err.message || String(err)));
+        } finally {
+          setGenerating(false);
+        }
+      };
+
       const handleFileUpload = function(e) {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
@@ -1160,74 +1536,85 @@
         }
         
         if (fileName.endsWith('.docx')) {
-          // Handle .docx files with mammoth.js
+          // Handle .docx files with mammoth.js. We use convertToHtml with a style map
+          // so that Word's Heading 1 becomes <h1> and Heading 2 becomes <h2>. This lets
+          // us preserve chapter and subheading structure that extractRawText would lose.
           console.log('Processing .docx file...');
           console.log('Mammoth available?', typeof mammoth !== 'undefined');
-          
+
           if (typeof mammoth === 'undefined') {
             setError('DOCX support library not loaded. Please refresh the page and try again.');
             return;
           }
-          
-          if (typeof mammoth.extractRawText !== 'function') {
+
+          if (typeof mammoth.convertToHtml !== 'function') {
             setError('DOCX support library incomplete. Please refresh the page and try again.');
             return;
           }
-          
+
           setProgress('Reading Word document...');
-          
-          // Convert file to ArrayBuffer for mammoth.js
+
           const reader = new FileReader();
           reader.onload = function(e) {
             const arrayBuffer = e.target.result;
             console.log('ArrayBuffer created, size:', arrayBuffer.byteLength);
-            
+
             if (arrayBuffer.byteLength === 0) {
               setError('The selected file appears to be empty or corrupted.');
               setProgress('');
               return;
             }
-            
-            mammoth.extractRawText({arrayBuffer: arrayBuffer}).then(function(result) {
-              console.log('Mammoth success:', result);
-              let extractedText = result.value || '';
-              
-              // Check if extraction actually worked
-              if (extractedText.length === 0) {
+
+            // Style map: force Word heading styles to HTML h1/h2. Body paragraphs
+            // become <p>. Everything else (bold, italic, lists) is stripped down to
+            // plain text per the Phase 4 scope decision.
+            const styleMap = [
+              "p[style-name='Heading 1'] => h1",
+              "p[style-name='heading 1'] => h1",
+              "p[style-name='Title'] => h1",
+              "p[style-name='Heading 2'] => h2",
+              "p[style-name='heading 2'] => h2",
+              "p[style-name='Subtitle'] => h2",
+            ];
+
+            mammoth.convertToHtml({ arrayBuffer: arrayBuffer }, { styleMap: styleMap }).then(function(result) {
+              console.log('Mammoth HTML success, length:', (result.value || '').length);
+              const html = result.value || '';
+              if (html.length === 0) {
                 setError('No text could be extracted from this Word document. Try saving it as .txt instead.');
                 setProgress('');
                 return;
               }
-              
-              // Clean up the text - mammoth sometimes adds extra whitespace
-              extractedText = extractedText
-                .replace(/\r\n/g, '\n')  // Normalize line endings
-                .replace(/\n{3,}/g, '\n\n')  // Collapse multiple empty lines to double
-                .trim();
-              
-              console.log('Extracted text length:', extractedText.length);
-              console.log('First 200 chars:', extractedText.substring(0, 200));
-              
+
+              // Flatten the HTML into a plain-text form the chapter detector understands:
+              //   <h1>Text</h1>  -> "Text\n\n" treated as a chapter heading line
+              //   <h2>Text</h2>  -> "## Text\n\n" subheading marker (handled in render)
+              //   <p>Text</p>    -> "Text\n\n"
+              //   all other tags -> stripped, their inner text preserved
+              const extractedText = flattenDocxHtml(html);
+
+              console.log('Flattened text length:', extractedText.length);
+              console.log('First 500 chars:', extractedText.substring(0, 500));
+
               setRawText(extractedText);
               setProgress('');
-              
-              // Show any mammoth warnings
+
               if (result.messages && result.messages.length > 0) {
                 console.log('Mammoth warnings:', result.messages);
               }
             }).catch(function(err) {
-              console.error('Mammoth extraction error:', err);
+              console.error('Mammoth conversion error:', err);
               setError('Could not read Word document: ' + (err.message || 'File may be corrupted or password-protected. Try saving as .txt instead.'));
               setProgress('');
             });
           };
-          
+
           reader.onerror = function(err) {
             console.error('File reading error:', err);
             setError('Failed to read file. Try saving your Word document as .txt instead.');
             setProgress('');
           };
-          
+
           reader.readAsArrayBuffer(file);
         } else {
           // Handle .txt and .md files
@@ -1416,30 +1803,45 @@
                     <div style={{ fontSize: 13, fontFamily: FONT, color: "#991B1B", fontWeight: 500 }}>{error}</div>
                   </div>
                 )}
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20, gap: 10, flexWrap: "wrap" }}>
                   <Button variant="secondary" onClick={function() { setStep(2); }}>&larr; Back</Button>
-                  <Button onClick={handleGenerate} disabled={generating}>{generating ? "Generating..." : "Generate PDF"}</Button>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Button variant="secondary" onClick={handleGenerateEpub} disabled={generating}>{generating ? "Working..." : "Generate EPUB"}</Button>
+                    <Button onClick={handleGenerate} disabled={generating}>{generating ? "Generating..." : "Generate PDF"}</Button>
+                  </div>
                 </div>
               </div>
             )}
 
-            {step === 4 && pdfUrl && (
+            {step === 4 && (pdfUrl || epubUrl) && (
               <div style={{ textAlign: "center", paddingTop: 40 }}>
                 <div style={{ width: 64, height: 64, borderRadius: 16, background: BRAND.success + "15", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>&#10003;</div>
                 <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Your Tinybook is Ready</h2>
                 <p style={{ color: BRAND.textSecondary, fontSize: 14, marginBottom: 32, fontFamily: FONT }}>{bookData.title} &middot; {chapters.length} chapters &middot; {totalWords.toLocaleString()} words</p>
-                <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-                  <a href={pdfUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Interior.pdf"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accent, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}>&darr; Download PDF</a>
-                  <Button variant="secondary" onClick={function() { setPdfUrl(null); setStep(3); }}>Back to Preview</Button>
+                <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+                  {pdfUrl && (
+                    <a href={pdfUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Interior.pdf"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accentDeep, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 1px 3px rgba(79, 95, 217, 0.35)" }}>&darr; Download PDF</a>
+                  )}
+                  {epubUrl && (
+                    <a href={epubUrl} download={(bookData.title.replace(/\s+/g, "_")) + ".epub"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accentDeep, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 1px 3px rgba(79, 95, 217, 0.35)" }}>&darr; Download EPUB</a>
+                  )}
+                  {!pdfUrl && epubUrl && (
+                    <Button variant="secondary" onClick={handleGenerate} disabled={generating}>Also Generate PDF</Button>
+                  )}
+                  {pdfUrl && !epubUrl && (
+                    <Button variant="secondary" onClick={handleGenerateEpub} disabled={generating}>Also Generate EPUB</Button>
+                  )}
+                  <Button variant="secondary" onClick={function() { setPdfUrl(null); setEpubUrl(null); setStep(3); }}>Back to Preview</Button>
                 </div>
                 <div style={{ marginTop: 40, padding: 16, background: BRAND.white, borderRadius: 10, border: "1px solid " + BRAND.border, textAlign: "left", maxWidth: 480, margin: "40px auto 0" }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Before sending to print:</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Before sending to print or publish:</div>
                   <div style={{ fontSize: 12, color: BRAND.textSecondary, lineHeight: 1.7, fontFamily: FONT }}>
-                    1. Open the PDF and check all pages render correctly<br />
-                    2. Verify chapter openings start on right-hand (recto) pages<br />
+                    1. Open the file and check all pages render correctly<br />
+                    2. For print PDF: verify chapter openings start on right-hand (recto) pages<br />
                     3. Check drop caps display properly at chapter starts<br />
                     4. Confirm page numbers and running headers are correct<br />
-                    5. Review the table of contents page numbers
+                    5. Review the table of contents<br />
+                    6. For EPUB: test in Apple Books or Kindle Previewer before uploading to retailers
                   </div>
                 </div>
               </div>
