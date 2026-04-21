@@ -97,9 +97,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.6.6",
+      version: "0.6.7",
       date: "2026-04-18",
       changes: [
+        "0.6.7 - Primary button resting state now uses the deep brand blue (#4F5FD9) instead of mid-lavender. Previous version was too close to the disabled color and only read as active on hover, which felt broken.",
         "0.6.6 - Fixed primary button contrast. Enabled state now uses the stronger brand blue (#8B9BFF base, #4F5FD9 hover) with subtle shadow so the 'ready to proceed' state reads as unambiguously active. Disabled state remains pale lavender at 0.55 opacity. Also added proper native disabled attribute and aria-disabled for accessibility.",
         "0.6.5 - Smart quotes conversion for all user text (titles, body, epigraphs, dedication, copyright). URL on reader bonus page auto-fits inside black bar. TOC no longer truncates titles when page numbers are single digits. Copyright page moved up from 59% to ~35% down. Section pages without chapter numbers now align to the same title baseline as numbered chapters. TOC dot leaders use consistent spacing right-aligned to page number column.",
         "0.6.4 - Reduced dedication font size from 12pt to 10pt for better proportion with body text.",
@@ -981,13 +982,15 @@
         alignItems: "center",
         gap: 6,
       };
-      // Primary: strong solid color when enabled (so it clearly reads as "active, click me"),
-      // softer pale-lavender only when disabled. Hover darkens slightly.
+      // Primary button at rest uses the deep brand blue so it reads as a clearly
+      // clickable primary action on a white background. Hover deepens further.
+      // Disabled falls back to the pale lavender + reduced opacity so the two states
+      // are unambiguously distinct at a glance.
       const variants = {
         primary: {
-          background: disabled ? BRAND.accent : (hovered ? BRAND.accentDeep : BRAND.accentHover),
+          background: disabled ? BRAND.accent : (hovered ? "#3D4BC4" : BRAND.accentDeep),
           color: BRAND.white,
-          boxShadow: disabled ? "none" : "0 1px 2px rgba(79, 95, 217, 0.25)",
+          boxShadow: disabled ? "none" : "0 1px 3px rgba(79, 95, 217, 0.35)",
         },
         secondary: {
           background: BRAND.white,
