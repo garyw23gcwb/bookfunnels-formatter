@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.4",
+      version: "0.7.5",
       date: "2026-05-11",
       changes: [
+        "0.7.5 - Reader Bonus page: text inside the black bars (READER BONUS header and URL footer) now vertically centers on cap-height. Previously a hardcoded y+27 baseline left text sitting low in the bar, and the offset got worse when the URL font auto-shrank for long URLs. New formula scales with font size.",
         "0.7.4 - Reader Bonus page: tightened vertical gaps between blocks. Title-to-body 30pt to 16pt, body-to-URL 40pt to 24pt, header-to-title 30pt to 24pt. Block still self-sizes around any title/body length and centers vertically on the page.",
         "0.7.3 - Reader Bonus page: reduced headline from 28pt to 22pt and body from 14pt to 12pt so typical CTA titles like 'Join The 48-Hour Tinybook Challenge' fit on two balanced lines instead of one word per line.",
         "0.7.2 - Reader Bonus page: title and body now wrap at the full text-block width to match the black bars above and below. Previously the title was inset 20pt per side and the body 30pt per side, which left visible padding gaps and forced short titles to wrap one word per line.",
@@ -607,11 +608,18 @@
         const availableH = SPEC.pageH;
         let y = Math.max(60, (availableH - totalH) * 0.40);
 
+        // Helper: baseline y to vertically center text on cap-height inside a bar.
+        // Works at any font size because the offset scales with the font.
+        function barBaseline(barTopY, barH, fontSize) {
+          return barTopY + (barH / 2) + (fontSize * SPEC.capHeightRatio / 2);
+        }
+
         // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
         doc.rect(textX, y, textW, HEADER_BAR_H, "F");
-        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(255);
-        doc.text("READER BONUS", centerX, y + 27, { align: "center" });
+        const headerSize = 18;
+        doc.setFont(BODY_FONT, "bold"); doc.setFontSize(headerSize); doc.setTextColor(255);
+        doc.text("READER BONUS", centerX, barBaseline(y, HEADER_BAR_H, headerSize), { align: "center" });
         doc.setTextColor(30);
         y += HEADER_BAR_H + GAP_HEADER_TO_TITLE;
 
@@ -645,7 +653,7 @@
             urlSize -= 0.5;
             doc.setFontSize(urlSize);
           }
-          doc.text(bookData.ctaUrl, centerX, y + 27, { align: "center" });
+          doc.text(bookData.ctaUrl, centerX, barBaseline(y, URL_BAR_H, urlSize), { align: "center" });
           doc.setTextColor(30);
         }
       }
