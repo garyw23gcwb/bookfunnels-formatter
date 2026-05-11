@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.6",
+      version: "0.7.7",
       date: "2026-05-11",
       changes: [
+        "0.7.7 - Two fixes: (1) Reader Bonus page: headline padding now equal above and below (16pt each side) so the title sits visually balanced. (2) Chapter recto bug: pass 2 page-advance was 'if (!isRecto()) newPage(); newPage();' which always landed the chapter on a verso. Pass 1 (TOC page numbering) already assumed recto starts, so the rendered chapter and the TOC page number disagreed. Fixed by swapping the order: newPage() first to leave the previous content, then advance once more if needed to reach recto. Same fix applied to back-of-book CTA.",
         "0.7.6 - Reader Bonus page: rewrote vertical layout using visual edges instead of baselines. Old code added GAP_HEADER_TO_TITLE then drew the title at that y as its baseline, so the cap-height pushed up into the gap and only ~8pt of visible space remained. Likewise GAP_TITLE_TO_BODY measured baseline-to-baseline plus a full TITLE_LINE_H of advance, producing ~35pt visible gap. New code positions text by cap-top from the preceding visible edge, so the gap values match what you see. Set to 18pt above the title, 14pt between title and body, 20pt above the URL bar.",
         "0.7.5 - Reader Bonus page: text inside the black bars (READER BONUS header and URL footer) now vertically centers on cap-height. Previously a hardcoded y+27 baseline left text sitting low in the bar, and the offset got worse when the URL font auto-shrank for long URLs. New formula scales with font size.",
         "0.7.4 - Reader Bonus page: tightened vertical gaps between blocks. Title-to-body 30pt to 16pt, body-to-URL 40pt to 24pt, header-to-title 30pt to 24pt. Block still self-sizes around any title/body length and centers vertically on the page.",
@@ -591,8 +592,8 @@
         //   TITLE_TO_BODY:   last title baseline (= cap-bottom) -> body cap-top
         //   BODY_TO_URL:     last body baseline -> URL bar top
         //   TITLE_TO_URL:    last title baseline -> URL bar top (when no body)
-        const GAP_HEADER_TO_TITLE = 18;
-        const GAP_TITLE_TO_BODY = 14;
+        const GAP_HEADER_TO_TITLE = 16;
+        const GAP_TITLE_TO_BODY = 16;
         const GAP_BODY_TO_URL = 20;
         const GAP_TITLE_TO_URL = 22;
 
@@ -932,9 +933,11 @@
         const ch = chapters[ci];
         onProgress("Formatting chapter " + (ci + 1) + " of " + chapters.length + "...");
         
-        // Chapters start on recto (odd) pages
-        if (!isRecto()) newPage();
+        // Chapters always start on a recto (right-hand) page.
+        // Advance one page off the previous content, then if that landed us on a
+        // verso, advance once more (so the verso ends up blank, the chapter on recto).
         newPage();
+        if (!isRecto()) newPage();
         
         bookPageNum = chapterPageNumbers[ci];
         const textW = getTextWidth();
@@ -1137,11 +1140,11 @@
         }
       }
 
-      // BACK CTA: one more pass at the end of the book, on a fresh recto if possible
-      // so it doesn't sit on the reverse of a chapter end. Same content as the front CTA.
+      // BACK CTA: one more pass at the end of the book, on a fresh recto so it
+      // doesn't sit on the reverse of a chapter end. Same content as the front CTA.
       if (bookData.ctaTitle) {
-        if (!isRecto()) newPage();
         newPage();
+        if (!isRecto()) newPage();
         renderCTAPage();
       }
 
