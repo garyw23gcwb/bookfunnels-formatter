@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.5",
+      version: "0.7.6",
       date: "2026-05-11",
       changes: [
+        "0.7.6 - Reader Bonus page: rewrote vertical layout using visual edges instead of baselines. Old code added GAP_HEADER_TO_TITLE then drew the title at that y as its baseline, so the cap-height pushed up into the gap and only ~8pt of visible space remained. Likewise GAP_TITLE_TO_BODY measured baseline-to-baseline plus a full TITLE_LINE_H of advance, producing ~35pt visible gap. New code positions text by cap-top from the preceding visible edge, so the gap values match what you see. Set to 18pt above the title, 14pt between title and body, 20pt above the URL bar.",
         "0.7.5 - Reader Bonus page: text inside the black bars (READER BONUS header and URL footer) now vertically centers on cap-height. Previously a hardcoded y+27 baseline left text sitting low in the bar, and the offset got worse when the URL font auto-shrank for long URLs. New formula scales with font size.",
         "0.7.4 - Reader Bonus page: tightened vertical gaps between blocks. Title-to-body 30pt to 16pt, body-to-URL 40pt to 24pt, header-to-title 30pt to 24pt. Block still self-sizes around any title/body length and centers vertically on the page.",
         "0.7.3 - Reader Bonus page: reduced headline from 28pt to 22pt and body from 14pt to 12pt so typical CTA titles like 'Join The 48-Hour Tinybook Challenge' fit on two balanced lines instead of one word per line.",
@@ -576,43 +577,58 @@
         const textW = getTextWidth();
         const centerX = textX + textW / 2;
 
-        // Constants for the layout
+        // Layout constants
         const HEADER_BAR_H = 40;
-        const TITLE_SIZE = 22;
-        const TITLE_LINE_H = 28;
-        const BODY_SIZE = 12;
-        const BODY_LINE_H = 16;
         const URL_BAR_H = 40;
-        const GAP_HEADER_TO_TITLE = 24;
-        const GAP_TITLE_TO_BODY = 16;
-        const GAP_BODY_TO_URL = 24;
+        const TITLE_SIZE = 22;
+        const TITLE_LINE_H = 28;   // baseline-to-baseline within title
+        const BODY_SIZE = 12;
+        const BODY_LINE_H = 16;    // baseline-to-baseline within body
 
-        // Measure title lines (full text-block width to match the bars above/below)
+        // VISUAL gaps. Each is measured edge-to-edge of the visible text,
+        // not baseline-to-baseline, so the rendered output matches the number.
+        //   HEADER_TO_TITLE: bar bottom -> title cap-top
+        //   TITLE_TO_BODY:   last title baseline (= cap-bottom) -> body cap-top
+        //   BODY_TO_URL:     last body baseline -> URL bar top
+        //   TITLE_TO_URL:    last title baseline -> URL bar top (when no body)
+        const GAP_HEADER_TO_TITLE = 18;
+        const GAP_TITLE_TO_BODY = 14;
+        const GAP_BODY_TO_URL = 20;
+        const GAP_TITLE_TO_URL = 22;
+
+        const titleCapH = TITLE_SIZE * SPEC.capHeightRatio;
+        const bodyCapH = BODY_SIZE * SPEC.capHeightRatio;
+
+        // Helper: baseline y to vertically center text on cap-height inside a bar.
+        function barBaseline(barTopY, barH, fontSize) {
+          return barTopY + (barH / 2) + (fontSize * SPEC.capHeightRatio / 2);
+        }
+
+        // Measure lines (full text-block width to match the bars above/below)
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
         const ctaLines = wrapTitle(bookData.ctaTitle || "", textW, TITLE_SIZE);
 
-        // Measure body lines (full text-block width to match the bars above/below)
         let bodyLines = [];
         if (bookData.ctaBody) {
           bodyLines = wrapText(bookData.ctaBody, textW, BODY_SIZE);
         }
 
-        // Total content height, with gaps only between blocks that actually exist
-        let totalH = HEADER_BAR_H + GAP_HEADER_TO_TITLE;
-        totalH += ctaLines.length * TITLE_LINE_H;
-        if (bodyLines.length > 0) totalH += GAP_TITLE_TO_BODY + (bodyLines.length * BODY_LINE_H);
-        if (bookData.ctaUrl) totalH += GAP_BODY_TO_URL + URL_BAR_H;
+        // Visual height of each multi-line block = capH + (N-1) * lineHeight
+        const titleBlockH = titleCapH + Math.max(0, ctaLines.length - 1) * TITLE_LINE_H;
+        const bodyBlockH = bodyLines.length > 0
+          ? bodyCapH + Math.max(0, bodyLines.length - 1) * BODY_LINE_H
+          : 0;
 
-        // Center the whole block vertically with a slight upper bias (65/35 split) so
-        // it reads as balanced rather than mathematically dead-centered.
+        // Total visual height of the whole CTA block
+        let totalH = HEADER_BAR_H + GAP_HEADER_TO_TITLE + titleBlockH;
+        if (bodyLines.length > 0) totalH += GAP_TITLE_TO_BODY + bodyBlockH;
+        if (bookData.ctaUrl) {
+          totalH += (bodyLines.length > 0 ? GAP_BODY_TO_URL : GAP_TITLE_TO_URL) + URL_BAR_H;
+        }
+
+        // Vertically center the block on the page with a slight upper bias.
         const availableH = SPEC.pageH;
         let y = Math.max(60, (availableH - totalH) * 0.40);
-
-        // Helper: baseline y to vertically center text on cap-height inside a bar.
-        // Works at any font size because the offset scales with the font.
-        function barBaseline(barTopY, barH, fontSize) {
-          return barTopY + (barH / 2) + (fontSize * SPEC.capHeightRatio / 2);
-        }
 
         // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
@@ -621,30 +637,37 @@
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(headerSize); doc.setTextColor(255);
         doc.text("READER BONUS", centerX, barBaseline(y, HEADER_BAR_H, headerSize), { align: "center" });
         doc.setTextColor(30);
-        y += HEADER_BAR_H + GAP_HEADER_TO_TITLE;
 
-        // Main title
+        // Main title — first cap-top sits GAP_HEADER_TO_TITLE below the bar
+        const titleCapTop = y + HEADER_BAR_H + GAP_HEADER_TO_TITLE;
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
-        for (const line of ctaLines) {
-          doc.text(line, centerX, y, { align: "center" });
-          y += TITLE_LINE_H;
+        let lastTitleBaseline = titleCapTop + titleCapH;
+        for (let i = 0; i < ctaLines.length; i++) {
+          const baseline = titleCapTop + titleCapH + i * TITLE_LINE_H;
+          doc.text(ctaLines[i], centerX, baseline, { align: "center" });
+          lastTitleBaseline = baseline;
         }
 
-        // Description text
+        // Description text — first cap-top sits GAP_TITLE_TO_BODY below the last title baseline
+        let lastVisibleBaseline = lastTitleBaseline;
         if (bodyLines.length > 0) {
-          y += GAP_TITLE_TO_BODY;
+          const bodyCapTop = lastTitleBaseline + GAP_TITLE_TO_BODY;
           doc.setFontSize(BODY_SIZE); doc.setFont(BODY_FONT, "normal");
-          for (const line of bodyLines) {
-            doc.text(line, centerX, y, { align: "center" });
-            y += BODY_LINE_H;
+          let lastBodyBaseline = bodyCapTop + bodyCapH;
+          for (let i = 0; i < bodyLines.length; i++) {
+            const baseline = bodyCapTop + bodyCapH + i * BODY_LINE_H;
+            doc.text(bodyLines[i], centerX, baseline, { align: "center" });
+            lastBodyBaseline = baseline;
           }
+          lastVisibleBaseline = lastBodyBaseline;
         }
 
-        // URL in black bar
+        // URL in black bar — bar top sits the appropriate gap below the last baseline
         if (bookData.ctaUrl) {
-          y += GAP_BODY_TO_URL;
+          const gap = (bodyLines.length > 0) ? GAP_BODY_TO_URL : GAP_TITLE_TO_URL;
+          const urlBarTop = lastVisibleBaseline + gap;
           doc.setFillColor(30, 30, 30);
-          doc.rect(textX, y, textW, URL_BAR_H, "F");
+          doc.rect(textX, urlBarTop, textW, URL_BAR_H, "F");
           doc.setFont(BODY_FONT, "normal"); doc.setTextColor(255);
           const maxUrlWidth = textW - 32;
           let urlSize = 16;
@@ -653,7 +676,7 @@
             urlSize -= 0.5;
             doc.setFontSize(urlSize);
           }
-          doc.text(bookData.ctaUrl, centerX, barBaseline(y, URL_BAR_H, urlSize), { align: "center" });
+          doc.text(bookData.ctaUrl, centerX, barBaseline(urlBarTop, URL_BAR_H, urlSize), { align: "center" });
           doc.setTextColor(30);
         }
       }
