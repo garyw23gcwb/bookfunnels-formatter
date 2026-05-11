@@ -11,6 +11,29 @@
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+
+  <!-- Hypher + Knuth-Liang English hyphenation patterns. Both ship CommonJS
+       (module.exports = ...), so we provide a small shim around the load.
+       We expose the constructor as window.__tbf_Hypher and the patterns as
+       window.__tbf_HyphenPatterns, then hyphenateWord() picks them up at
+       PDF-generation time. If either script fails to load the formatter
+       falls back to a rule-based hyphenator with no user-visible breakage. -->
+  <script>
+    window.__tbf_savedModule = window.module;
+    window.module = { exports: null };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/hypher@0.2.5/lib/hypher.js"></script>
+  <script>
+    window.__tbf_Hypher = window.module && window.module.exports;
+    window.module = { exports: null };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/hyphenation.en-us@0.2.1/lib/en-us.js"></script>
+  <script>
+    window.__tbf_HyphenPatterns = window.module && window.module.exports;
+    window.module = window.__tbf_savedModule;
+    try { delete window.__tbf_savedModule; } catch (e) {}
+  </script>
+
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -108,9 +131,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.2",
+      version: "0.9.3",
       date: "2026-05-11",
       changes: [
+        "0.9.3 - Upgrade hyphenation to true Knuth-Liang via the Hypher library + the en-us pattern file. Both ship CommonJS, so they're loaded in <head> with a small module.exports shim that exposes Hypher and the patterns as window.__tbf_Hypher / window.__tbf_HyphenPatterns. hyphenateWord() now picks the Knuth-Liang result when Hypher is available and falls back to the v0.9.0 rule-based hyphenator if either script fails to load (offline, blocked, etc.) so there is no failure mode. Visible improvements over rule-based: 'something' breaks as some-thing (was so-mething), 'running' as run-ning (was runn-ing), 'started' stays whole because no clean 2/3 split exists (was star-ted), 'philosophy' offers phi-los-o-phy (was phi-losophy / philo-sophy), 'recognition' as recog-ni-tion (was four sub-optimal splits). Total CDN payload: ~7 KB hypher + ~27 KB patterns, served from jsDelivr.",
         "0.9.2 - Fix empty main content area on page load. The v0.7.9 autosave persisted the current 'step' value to localStorage, but a user who last left the app on Step 4 (Download) would reload to a blank card: the Step 4 render is gated by 'step === 4 && (pdfUrl || epubUrl)', and pdfUrl / epubUrl are blob URLs that only live for the current session — they aren't (and shouldn't be) persisted. On reload, step was 4 but the URLs were gone, so nothing rendered. Fixed by clamping the restored step from 4 to 3 (Preview) so the user lands somewhere actionable and can regenerate.",
         "0.9.1 - Drop cap typography fixes. Two long-standing bugs corrected. (1) Vertical sizing: getDropCapSize() previously computed capHeight = N * lineHeight, which put the cap's baseline one inter-line gap BELOW line N's baseline. The result was that line N+1 of the body text touched (or overlapped) the bottom of the drop cap. Fixed to capHeight = (N-1) * lineHeight + bodyCapHeight, the InDesign 'Drop Cap Number of Lines = N' convention used by every well-typeset trade book. Drop cap is now ~52pt (was ~62pt) for the default preset; cap-top aligns with line 1's cap-top, baseline aligns with line N's baseline, and line N+1 below has normal line-height clearance. (2) Per-letter tuck-in: all DROP_CAP_TUCK values reset to 0. The old tuck values (L=0.45, T=0.25, F=0.22, etc.) tried to pull body text into the letter's empty space on the right, but failed for letters whose shape changes vertically — e.g. an L has a vertical stroke at the top (open right) but a full-width foot at the bottom, so lines 2-3 of body text alongside the foot overlapped the ink. Pro typography just clears the letter's bounding box uniformly and adds a small padding gap (we use 5pt). The table is kept structurally for possible future per-line tuck logic but is a no-op for now.",
         "0.9.0 - Body text now justifies with hyphenation, the way trade-book typography works. Replaces jsPDF's align:'justify' (which stretches spaces only and produces word-space rivers in narrow columns) with three new helpers: hyphenateWord() does rule-based English hyphenation (prefixes, suffixes, V|CV and VC|CV consonant clusters — approximates Knuth-Liang at ~75% accuracy, no external pattern data); breakIntoJustifiedLines() runs a greedy line-breaker that hyphenates the next word into the current line when there is room for a hyphenated prefix; drawJustifiedLine() stretches inter-word spaces and draws a '-' at hyphenated line endings. The last line of each paragraph stays ragged-right (industry standard). Applied to plain body paragraphs and to the drop-cap paragraph's narrow-then-full line block. Formatted paragraphs (containing **bold** / *italic* / __underline__ markers) stay ragged-right via the existing drawRunLine path — extending hyphenation to those is future work.",
@@ -505,21 +529,71 @@
     // renderer that draws "-" at hyphenated line endings.
     // =====================================================================
 
-    // Rule-based English hyphenation. Returns sorted array of break-point
-    // positions inside the word. Lower-accuracy approximation of the
-    // Knuth-Liang algorithm (no external pattern data), but catches ~75%
-    // of valid break opportunities — enough to eliminate most rivers.
+    // English hyphenation. Returns sorted array of break-point positions
+    // inside the word. Prefers the real Knuth-Liang algorithm via the Hypher
+    // library (loaded from CDN in the <head>) and falls back to a rule-based
+    // hyphenator if the CDN scripts didn't load (offline, blocked, etc.).
+    //
+    // Hypher returns the word split into chunks (["phi", "los", "o", "phy"]);
+    // we convert that to break-point positions ([3, 6, 7]) so the line
+    // breaker can pick the longest hyphenated prefix that still fits.
+    let _hypherInstance = null;
+    let _hypherInitTried = false;
+    function _getHypher() {
+      if (_hypherInitTried) return _hypherInstance;
+      _hypherInitTried = true;
+      if (typeof window === "undefined") return null;
+      const Ctor = window.__tbf_Hypher;
+      const patterns = window.__tbf_HyphenPatterns;
+      if (!Ctor || !patterns) return null;
+      try {
+        _hypherInstance = new Ctor(patterns);
+      } catch (e) {
+        console.warn("Hypher init failed, using rule-based fallback:", e);
+        _hypherInstance = null;
+      }
+      return _hypherInstance;
+    }
+
     function hyphenateWord(word) {
       if (word.length < 7) return [];
       // Only hyphenate plain ASCII letter words. Skip URLs, contractions
       // ("self-doubt"), numbers ("20th"), etc.
       if (!/^[a-zA-Z]+$/.test(word)) return [];
 
+      const hypher = _getHypher();
+      if (hypher) {
+        try {
+          const chunks = hypher.hyphenate(word);
+          if (chunks.length <= 1) return [];
+          const positions = [];
+          let pos = 0;
+          for (let i = 0; i < chunks.length - 1; i++) {
+            pos += chunks[i].length;
+            positions.push(pos);
+          }
+          // Defensive: Hypher already respects leftmin/rightmin from the
+          // patterns file (2/3 for en-us), but enforce the same minimums
+          // again so a future pattern-file swap can't surprise us.
+          return positions.filter(function(p) { return p >= 2 && word.length - p >= 3; });
+        } catch (e) {
+          // Fall through to rule-based
+        }
+      }
+
+      return _ruleBasedHyphenateWord(word);
+    }
+
+    // Rule-based fallback. Combines prefix and suffix matches with V|CV /
+    // VC|CV consonant-cluster patterns. ~75% accuracy vs Knuth-Liang —
+    // good enough to eliminate most word-space rivers but produces some
+    // sub-optimal breaks ("runn-ing" vs Hypher's "run-ning") on words with
+    // double consonants and other patterns the rules don't cover.
+    function _ruleBasedHyphenateWord(word) {
       const lower = word.toLowerCase();
       const breaks = new Set();
       const vowels = /[aeiouy]/;
 
-      // Common English prefixes — break right after them.
       const prefixes = [
         "un", "re", "in", "im", "dis", "mis", "pre", "pro",
         "non", "anti", "auto", "fore", "hyper", "inter",
@@ -532,7 +606,6 @@
         }
       }
 
-      // Common English suffixes — break right before them.
       const suffixes = [
         "able", "ible", "ation", "ition", "ment", "ness",
         "ity", "ous", "ful", "less", "ing", "tion", "sion",
@@ -545,14 +618,10 @@
         }
       }
 
-      // Internal break-points by vowel-consonant pattern.
-      //   V|CV   (single consonant between vowels)   -> break before the C
-      //   VC|CV  (multiple consonants between vowels) -> break after first C
       for (let i = 2; i <= lower.length - 3; i++) {
         const prev = lower[i - 1];
         const cur = lower[i];
         if (!vowels.test(prev) || vowels.test(cur)) continue;
-        // Walk forward to the next vowel.
         let j = i;
         while (j < lower.length && !vowels.test(lower[j])) j++;
         if (j === lower.length) continue;
@@ -563,7 +632,6 @@
         }
       }
 
-      // Knuth-Liang minimums: keep 2+ chars before, 3+ chars after the break.
       return Array.from(breaks)
         .filter(function(i) { return i >= 2 && lower.length - i >= 3; })
         .sort(function(a, b) { return a - b; });
