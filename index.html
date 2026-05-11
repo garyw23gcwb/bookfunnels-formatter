@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.1",
-      date: "2026-04-21",
+      version: "0.7.2",
+      date: "2026-05-11",
       changes: [
+        "0.7.2 - Reader Bonus page: title and body now wrap at the full text-block width to match the black bars above and below. Previously the title was inset 20pt per side and the body 30pt per side, which left visible padding gaps and forced short titles to wrap one word per line.",
         "0.7.1 - Two fixes: (1) CTA page alignment - previously the title text centered on the absolute page midline while the black bars centered on the text-block midline, causing a ~12pt leftward offset of the title relative to the bars. All centered text (CTA, title page, copyright, dedication, TOC, chapter titles, epigraphs) now centers on the text block, which also corrects the same subtle offset everywhere else. CTA page content now also vertically centers on the page with a 60/40 upper bias so it reads balanced rather than top-heavy. (2) EPUB chapter break - 'Chapter 1' was landing alone on one page with its title on the next because both p.chapter-num and h1 had page-break-before. Fixed by moving the page break to whichever element opens the chapter (chapter-num when numbered, h1.chapter-opener when unnumbered) and adding page-break-after:avoid so the title stays with the number.",
         "0.7.0 - Major feature set: drop cap per-letter tuck-in table (L, T, I, F, J, P, Y no longer leave awkward right-side gaps); justified body text with ragged last line (industry standard); back-of-book reader bonus CTA page (same content as front, appears after final chapter on a fresh recto); docx H1/H2 structure preserved via mammoth convertToHtml with style map (H2 subheadings render as bold, oversized, with breathing room); EPUB 3.0 export for Apple Books, Kobo, Google Play, and KDP (Amazon converts EPUB to Kindle format server-side); JSZip added as dependency for EPUB packaging. Not yet done: full manuscript stress test is for you to run.",
         "0.6.7 - Primary button resting state now uses the deep brand blue (#4F5FD9) instead of mid-lavender. Previous version was too close to the disabled color and only read as active on hover, which felt broken.",
@@ -583,14 +584,14 @@
         const GAP_TITLE_TO_BODY = 30;
         const GAP_BODY_TO_URL = 40;
 
-        // Measure title lines
+        // Measure title lines (full text-block width to match the bars above/below)
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
-        const ctaLines = wrapTitle(bookData.ctaTitle || "", textW - 40, TITLE_SIZE);
+        const ctaLines = wrapTitle(bookData.ctaTitle || "", textW, TITLE_SIZE);
 
-        // Measure body lines
+        // Measure body lines (full text-block width to match the bars above/below)
         let bodyLines = [];
         if (bookData.ctaBody) {
-          bodyLines = wrapText(bookData.ctaBody, textW - 60, BODY_SIZE);
+          bodyLines = wrapText(bookData.ctaBody, textW, BODY_SIZE);
         }
 
         // Total content height, with gaps only between blocks that actually exist
