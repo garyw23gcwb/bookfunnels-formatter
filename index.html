@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.9",
+      version: "0.8.0",
       date: "2026-05-11",
       changes: [
+        "0.8.0 - Inline formatting toolbar in Step 3. Each chapter's body editor now has a B / I / U + H2 / H3 strip above the textarea that wraps the current selection (B/I/U) or toggles a line prefix (H2/H3) in markdown-lite syntax: **bold**, *italic*, __underline__, ## Heading, ### Subhead. The PDF renderer honors all five through new helpers (parseInlineRuns, layoutRunsMixed, drawRunLine, classifyParagraph). The render path is gated by containsFormatting(): paragraphs without markers keep the v0.7.9 justified rendering, so unformatted chapters look identical to before. Paragraphs with markers use the run-based ragged-right path (drawRunLine doesn't justify). H3 now actually renders in the PDF (the '### ' prefix was preserved through docx import in v0.7.9 but not drawn). H2 unchanged — same smart break that reserves 2 body lines beneath it. Drop cap on the first body paragraph still works alongside inline formatting. Pass 1 (TOC page-number dry run) updated in lockstep so TOC numbers stay accurate.",
         "0.7.9 - Backend keepers ported from the parallel v0.8.0 work track. No visible UI change. (1) Autosave: bookData, rawText, chapters, step and textSizePreset now persist to localStorage with a 400ms debounce and hydrate on first render, so a tab refresh or crash no longer wipes in-progress work. (2) Docx import robustness: flattenDocxHtml now recurses into nested section / div / article / main containers so headings buried below the top level of mammoth's output still surface (fixes the 'one chapter missing on real manuscripts' case). H3 headings preserved with a '### ' prefix in the flattened output (rendering of that prefix comes in v0.8.0). (3) pickDropCap() helper finds the first alphabetic character in a paragraph so paragraphs that open with a smart quote, numeral, em-dash or symbol still get a clean drop cap glyph instead of garbage. Applied in both the PDF dry-run and the actual render path. (4) Iframe height reporter: emits postMessage({type:'tinybook:height', height}) to the parent window on mount and on every resize, so a hosting page can auto-size the iframe embed. (5) CDN version pins: React 18.3.1, ReactDOM 18.3.1 and Babel standalone 7.25.6 are now pinned so surprise upstream releases can't break the tool.",
         "0.7.8 - Internal cleanup, no visible change. Removed two drift risks surfaced by the post-recto-fix audit: (1) Pass 1 and pass 2 both reset the y cursor after a page break to 'top margin + 30', but expressed it two different ways - pass 1 read SPEC.margins.recto.top directly, pass 2 read getMargins().top. Equal today, drift risk if margins ever go asymmetric. Both now call a single helper bodyTopY(). (2) calcOpeningHeight() hardcoded 252 and 192 for title and epigraph wrap widths. Now derives them from SPEC the same way pass 2 does.",
         "0.7.7 - Two fixes: (1) Reader Bonus page: headline padding now equal above and below (16pt each side) so the title sits visually balanced. (2) Chapter recto bug: pass 2 page-advance was 'if (!isRecto()) newPage(); newPage();' which always landed the chapter on a verso. Pass 1 (TOC page numbering) already assumed recto starts, so the rendered chapter and the TOC page number disagreed. Fixed by swapping the order: newPage() first to leave the previous content, then advance once more if needed to reach recto. Same fix applied to back-of-book CTA.",
@@ -361,6 +362,118 @@
       }
       if (currentChapter) { currentChapter.body = buffer.join("\n").trim(); chapters.push(currentChapter); }
       return chapters;
+    }
+
+    // =====================================================================
+    // Inline formatting helpers.
+    // Body text supports a small markdown-lite syntax that the toolbar in
+    // Step 3 injects into the textarea:
+    //   **bold**       -> bold run
+    //   *italic*       -> italic run
+    //   __underline__  -> underline run (thin line under the run)
+    //   ## Heading     -> H2 at start of paragraph (one size up, bold)
+    //   ### Subhead    -> H3 at start of paragraph (smaller, bold, tighter)
+    //
+    // containsFormatting() gates the run-based render path so paragraphs with
+    // no markers keep the existing splitTextToSize / justified rendering. That
+    // way an unformatted chapter renders byte-identically to the prior version.
+    // =====================================================================
+
+    function parseInlineRuns(text) {
+      const runs = [];
+      let buf = "";
+      const flushBuf = function() { if (buf.length > 0) { runs.push({ text: buf, style: "normal" }); buf = ""; } };
+      let i = 0;
+      while (i < text.length) {
+        const c = text[i], n = text[i + 1];
+        if (c === "*" && n === "*") {
+          const end = text.indexOf("**", i + 2);
+          if (end !== -1) { flushBuf(); runs.push({ text: text.slice(i + 2, end), style: "bold" }); i = end + 2; continue; }
+        }
+        if (c === "_" && n === "_") {
+          const end = text.indexOf("__", i + 2);
+          if (end !== -1) { flushBuf(); runs.push({ text: text.slice(i + 2, end), style: "underline" }); i = end + 2; continue; }
+        }
+        if (c === "*") {
+          const end = text.indexOf("*", i + 1);
+          if (end !== -1 && text[end + 1] !== "*") { flushBuf(); runs.push({ text: text.slice(i + 1, end), style: "italic" }); i = end + 1; continue; }
+        }
+        buf += c; i++;
+      }
+      flushBuf();
+      return runs.length > 0 ? runs : [{ text: "", style: "normal" }];
+    }
+
+    function plainTextFromRuns(runs) {
+      return runs.map(function(r) { return r.text; }).join("");
+    }
+
+    function pdfStyleFor(s) { return s === "bold" ? "bold" : s === "italic" ? "italic" : "normal"; }
+
+    // Cheap gate: a paragraph has formatting iff parseInlineRuns produces
+    // at least one non-normal run. If false, use the existing render path
+    // (which preserves justified body text). If true, use the run path.
+    function containsFormatting(text) {
+      const runs = parseInlineRuns(text);
+      return runs.some(function(r) { return r.style !== "normal"; });
+    }
+
+    // Lay out runs into wrapped lines. `widths` can be a single number
+    // (uniform width) or an array (different width per line index, last
+    // entry repeats). The array form is used by the drop cap path: first
+    // 3 line widths are narrow (textW - dropCapWidth), then full width.
+    function layoutRunsMixed(doc, runs, widths, fontSize, fontFamily) {
+      const tokens = [];
+      for (const run of runs) {
+        const parts = run.text.split(/(\s+)/);
+        for (const p of parts) { if (p.length > 0) tokens.push({ text: p, style: run.style }); }
+      }
+      const getW = function(i) { return typeof widths === "number" ? widths : (i < widths.length ? widths[i] : widths[widths.length - 1]); };
+      const lines = [[]];
+      let curW = 0, lineIdx = 0;
+      for (const tok of tokens) {
+        doc.setFont(fontFamily, pdfStyleFor(tok.style)); doc.setFontSize(fontSize);
+        const w = doc.getTextWidth(tok.text);
+        const isSpace = /^\s+$/.test(tok.text);
+        const maxW = getW(lineIdx);
+        if (isSpace) {
+          if (lines[lineIdx].length === 0) continue;
+          if (curW + w > maxW) { lines.push([]); lineIdx++; curW = 0; continue; }
+          lines[lineIdx].push({ text: tok.text, style: tok.style, width: w }); curW += w;
+        } else {
+          if (curW + w > maxW && lines[lineIdx].length > 0) {
+            while (lines[lineIdx].length > 0 && /^\s+$/.test(lines[lineIdx][lines[lineIdx].length - 1].text)) {
+              curW -= lines[lineIdx].pop().width;
+            }
+            lines.push([]); lineIdx++; curW = 0;
+          }
+          lines[lineIdx].push({ text: tok.text, style: tok.style, width: w }); curW += w;
+        }
+      }
+      if (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
+      return lines;
+    }
+
+    // Render one wrapped line. Switches font per segment; for underline
+    // segments draws a thin line below the segment (jsPDF has no native
+    // underline style).
+    function drawRunLine(doc, segments, x, y, fontSize, fontFamily) {
+      let cx = x;
+      for (const seg of segments) {
+        doc.setFont(fontFamily, pdfStyleFor(seg.style)); doc.setFontSize(fontSize);
+        doc.text(seg.text, cx, y);
+        if (seg.style === "underline") {
+          doc.setLineWidth(0.4); doc.setDrawColor(30);
+          doc.line(cx, y + 1.5, cx + seg.width, y + 1.5);
+        }
+        cx += seg.width;
+      }
+    }
+
+    function classifyParagraph(p) {
+      if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
+      if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
+      return { type: "body", text: p };
     }
 
     // Font loading utility
@@ -786,12 +899,13 @@
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
           const para = paragraphs[pi];
-          if (isFirstPara && para.length > 0) {
-            // Drop cap takes ~3 lines at the narrow width, then continues at full width.
-            // Must mirror the render path exactly so TOC page numbers stay accurate.
+          const cls = classifyParagraph(para);
+
+          // First paragraph with drop cap (body only — a heading at the top of
+          // a chapter does not get a drop cap).
+          if (isFirstPara && cls.type === "body" && para.length > 0) {
             const dc = pickDropCap(para);
             if (!dc) {
-              // No alphabetic start - render as a plain paragraph in the dry run too.
               const fl = doc.splitTextToSize(para, textW);
               for (const line of fl) { if (y > maxY) { pages++; y = bodyTopY(); } y += SPEC.lineHeight; }
               isFirstPara = false; y += SPEC.paraGap; continue;
@@ -802,56 +916,85 @@
             const dropCapWidth = dropCapTuckedWidth(rawDropCapWidth, dropLetter) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
-            let remaining = dc.rest;
-            let lc = 0;
-            while (lc < SPEC.dropCapLines && remaining.length > 0) {
-              const nl = doc.splitTextToSize(remaining, narrowWidth);
-              if (nl.length > 0) { remaining = remaining.slice(nl[0].length).trim(); y += SPEC.lineHeight; lc++; }
-              else break;
-            }
-            if (remaining.length > 0) {
-              const fl = doc.splitTextToSize(remaining, textW);
-              for (const line of fl) {
+
+            if (containsFormatting(para)) {
+              // Run-based drop cap: parse the remaining text into runs and
+              // count lines via layoutRunsMixed with [narrow, narrow, narrow, full].
+              const runs = parseInlineRuns(dc.rest);
+              const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
+              const lines = layoutRunsMixed(doc, runs, widths, SPEC.bodySize, BODY_FONT);
+              for (let li = 0; li < lines.length; li++) {
                 if (y > maxY) { pages++; y = bodyTopY(); }
                 y += SPEC.lineHeight;
+              }
+            } else {
+              let remaining = dc.rest;
+              let lc = 0;
+              while (lc < SPEC.dropCapLines && remaining.length > 0) {
+                const nl = doc.splitTextToSize(remaining, narrowWidth);
+                if (nl.length > 0) { remaining = remaining.slice(nl[0].length).trim(); y += SPEC.lineHeight; lc++; }
+                else break;
+              }
+              if (remaining.length > 0) {
+                const fl = doc.splitTextToSize(remaining, textW);
+                for (const line of fl) {
+                  if (y > maxY) { pages++; y = bodyTopY(); }
+                  y += SPEC.lineHeight;
+                }
               }
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
 
-          // Subheading marker in dry-run: mirror the render path so TOC stays accurate.
-          if (para.startsWith("## ")) {
-            const subText = para.slice(3).trim();
-            const subSize = SPEC.bodySize + 3;
+          // H2 / H3 headings. Smart break: never let a heading dangle alone at
+          // the bottom of a page — reserve ~2 body lines beneath it.
+          if (cls.type === "h2" || cls.type === "h3") {
+            const subSize = cls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
             const subLineHeight = subSize * 1.35;
-            y += SPEC.paraGap * 2;
+            const gapAbove = cls.type === "h2" ? SPEC.paraGap * 2 : SPEC.paraGap * 1.5;
+            const gapBelow = cls.type === "h2" ? 4 : 3;
             doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
-            const subLines = doc.splitTextToSize(subText, textW);
-            const needed = subLines.length * subLineHeight + (SPEC.lineHeight * 2);
+
+            let subLineCount;
+            if (containsFormatting(cls.text)) {
+              const headRuns = parseInlineRuns(cls.text).map(function(r) {
+                return { text: r.text, style: r.style === "italic" ? "italic" : "bold" };
+              });
+              subLineCount = layoutRunsMixed(doc, headRuns, textW, subSize, BODY_FONT).length;
+            } else {
+              subLineCount = doc.splitTextToSize(cls.text, textW).length;
+            }
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * 2);
+
             if (y + needed > maxY) {
               pages++; y = bodyTopY();
             }
-            for (const _s of subLines) { y += subLineHeight; }
-            y += 4;
+            y += gapAbove;
+            for (let _i = 0; _i < subLineCount; _i++) y += subLineHeight;
+            y += gapBelow;
             continue;
           }
 
+          // Regular body paragraph
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
-          const lines = doc.splitTextToSize(para, textW);
-          
+          let bodyLineCount;
+          if (containsFormatting(para)) {
+            const runs = parseInlineRuns(para);
+            bodyLineCount = layoutRunsMixed(doc, runs, textW, SPEC.bodySize, BODY_FONT).length;
+          } else {
+            bodyLineCount = doc.splitTextToSize(para, textW).length;
+          }
+
           // Apply same widow/orphan control as in rendering
-          if (WIDOW_ORPHAN.enabled && lines.length > 0) {
+          if (WIDOW_ORPHAN.enabled && bodyLineCount > 0) {
             let linesOnCurrentPage = 0;
             let tempY = y;
-            for (const line of lines) {
+            for (let _i = 0; _i < bodyLineCount; _i++) {
               if (tempY > maxY) break;
               linesOnCurrentPage++;
               tempY += SPEC.lineHeight;
             }
-            
-            const remainingLines = lines.length - linesOnCurrentPage;
-            
-            // Widow prevention or orphan prevention
+            const remainingLines = bodyLineCount - linesOnCurrentPage;
             if ((remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) ||
                 (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0)) {
               if (linesOnCurrentPage > 0) {
@@ -859,8 +1002,8 @@
               }
             }
           }
-          
-          for (const line of lines) {
+
+          for (let _i = 0; _i < bodyLineCount; _i++) {
             if (y > maxY) { pages++; y = bodyTopY(); }
             y += SPEC.lineHeight;
           }
@@ -1041,53 +1184,62 @@
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
-          if (isFirstPara && para.length > 0) {
+          const cls = classifyParagraph(para);
+
+          // First paragraph with drop cap (body only — a heading at the top
+          // of a chapter does not get a drop cap).
+          if (isFirstPara && cls.type === "body" && para.length > 0) {
             const dc = pickDropCap(para);
             if (!dc) {
-              // No alphabetic character to use as a drop cap (pure numerals,
-              // symbols, etc). Fall through to the normal paragraph rendering
-              // path instead of drawing a garbage glyph.
               isFirstPara = false;
-              pi--; // re-process this paragraph in the non-first-para branch
-              continue;
+              pi--; continue;
             }
             const dropLetter = dc.letter;
             const restText = dc.rest;
 
-            // Drop cap positioning:
-            // Typographic rule is that the top of the drop cap's cap-height should sit flush
-            // with the top of the first body line's cap-height. jsPDF positions text by
-            // baseline, so we work backwards:
-            //   - First body line baseline is at (y + BASELINE_OFFSET)
-            //   - Cap-height for most serif fonts is capHeightRatio * font size above baseline
-            //   - First line cap-top = (y + BASELINE_OFFSET) - (bodySize * capHeightRatio)
-            //   - Drop cap baseline = firstLineCapTop + (getDropCapSize() * capHeightRatio)
-            // getDropCapSize() is sized so cap-height exactly spans dropCapLines of body text,
-            // making the drop cap visually occupy the full 3-line block.
+            // Drop cap positioning (unchanged from prior versions):
+            // Top of the drop cap's cap-height sits flush with the top of the
+            // first body line's cap-height. jsPDF positions by baseline, so:
+            //   firstLineCapTop = (y + BASELINE_OFFSET) - (bodySize * capHeightRatio)
+            //   dropCapBaseline = firstLineCapTop + (dropCapSize * capHeightRatio)
             const dropCapSize = getDropCapSize();
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(dropCapSize); doc.setTextColor(30);
             const rawDropCapWidth = doc.getTextWidth(dropLetter);
-            // Apply per-letter tuck so narrow/asymmetric caps don't leave awkward gaps.
             const dropCapWidth = dropCapTuckedWidth(rawDropCapWidth, dropLetter) + 5;
             const firstLineCapTop = (y + BASELINE_OFFSET) - (SPEC.bodySize * SPEC.capHeightRatio);
             const dropCapBaseline = firstLineCapTop + (dropCapSize * SPEC.capHeightRatio);
             doc.text(dropLetter, textX, dropCapBaseline);
 
-            // Now render the narrow lines next to the drop cap using the SAME baseline offset
-            // as all other body lines so vertical rhythm is preserved.
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
+
+            if (containsFormatting(para)) {
+              // Run-based drop cap body: parse the rest into runs, lay out
+              // with [narrow, narrow, narrow, full] widths, drawRunLine each.
+              // Ragged-right (drawRunLine doesn't justify).
+              const runs = parseInlineRuns(restText);
+              const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
+              const lines = layoutRunsMixed(doc, runs, widths, SPEC.bodySize, BODY_FONT);
+              doc.setTextColor(30);
+              for (let li = 0; li < lines.length; li++) {
+                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+                const x = li < SPEC.dropCapLines ? textX + dropCapWidth : textX;
+                drawRunLine(doc, lines[li], x, y + BASELINE_OFFSET, SPEC.bodySize, BODY_FONT);
+                y += SPEC.lineHeight;
+              }
+              resetBodyFont();
+              isFirstPara = false; y += SPEC.paraGap; continue;
+            }
+
+            // Plain drop cap body (no inline markers) — preserve v0.7.x
+            // justified rendering exactly.
             let remainingText = restText;
             let lineCount = 0;
-            // Track whether the drop cap block will be followed by more full-width lines.
-            // If yes, narrow lines are all "interior" lines (justify). If no, the final
-            // narrow line is the paragraph's last line and should NOT be justified.
             while (lineCount < SPEC.dropCapLines && remainingText.length > 0) {
               const narrowLines = wrapText(remainingText, narrowWidth, SPEC.bodySize);
               if (narrowLines.length > 0) {
                 const lineText = narrowLines[0];
                 const sliced = remainingText.slice(lineText.length).trim();
-                // Last line of paragraph if there's nothing left AND no remaining text after drop cap block
                 const isLastLineOfPara = sliced.length === 0;
                 if (isLastLineOfPara) {
                   doc.text(lineText, textX + dropCapWidth, y + BASELINE_OFFSET);
@@ -1099,7 +1251,6 @@
               } else break;
             }
             if (remainingText.length > 0) {
-              // Add a small gap between drop cap section and remaining text
               y += 3;
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
               for (let li = 0; li < fullLines.length; li++) {
@@ -1116,36 +1267,100 @@
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
 
-          // Subheading marker: paragraphs starting with "## " are H2s from the docx
-          // converter (or anyone who wrote them in that style). Render as bold, one
-          // size up, with a larger gap above so they break up the chapter visually.
-          if (para.startsWith("## ")) {
-            const subText = para.slice(3).trim();
-            const subSize = SPEC.bodySize + 3;
+          // H2 / H3 headings. Reserve at least 2 body lines beneath so the
+          // heading does not dangle alone at the bottom of a page.
+          if (cls.type === "h2" || cls.type === "h3") {
+            const subSize = cls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
             const subLineHeight = subSize * 1.35;
-            y += SPEC.paraGap * 2; // extra breathing room above
-            doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize); doc.setTextColor(30);
-            const subLines = doc.splitTextToSize(subText, textW);
-            // Keep subheading with at least 2 lines of following body (avoid orphaning)
-            const needed = subLines.length * subLineHeight + (SPEC.lineHeight * 2);
+            const gapAbove = cls.type === "h2" ? SPEC.paraGap * 2 : SPEC.paraGap * 1.5;
+            const gapBelow = cls.type === "h2" ? 4 : 3;
+
+            doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+
+            // Two parallel forms: run-based when the heading has inline
+            // markers, plain splitTextToSize otherwise.
+            let plainSubLines = null;
+            let runSubLines = null;
+            if (containsFormatting(cls.text)) {
+              const headRuns = parseInlineRuns(cls.text).map(function(r) {
+                return { text: r.text, style: r.style === "italic" ? "italic" : "bold" };
+              });
+              runSubLines = layoutRunsMixed(doc, headRuns, textW, subSize, BODY_FONT);
+            } else {
+              plainSubLines = doc.splitTextToSize(cls.text, textW);
+            }
+            const subLineCount = (runSubLines || plainSubLines).length;
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * 2);
+
             if (y + needed > maxY) {
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
               y = bodyTopY(); resetBodyFont();
-              doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
             }
-            for (const sline of subLines) {
-              doc.text(sline, textX, y + subSize * 0.8);
-              y += subLineHeight;
+
+            y += gapAbove;
+            doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize); doc.setTextColor(30);
+            if (runSubLines) {
+              for (const line of runSubLines) {
+                drawRunLine(doc, line, textX, y + subSize * 0.8, subSize, BODY_FONT);
+                y += subLineHeight;
+              }
+            } else {
+              for (const sline of plainSubLines) {
+                doc.text(sline, textX, y + subSize * 0.8);
+                y += subLineHeight;
+              }
             }
-            y += 4;
+            y += gapBelow;
             resetBodyFont();
             continue;
           }
 
+          // Regular body paragraph. Formatted paragraphs render through
+          // drawRunLine and are ragged-right; plain paragraphs keep the
+          // existing justified rendering so unformatted chapters look
+          // identical to v0.7.x.
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+
+          if (containsFormatting(para)) {
+            const runs = parseInlineRuns(para);
+            const runLines = layoutRunsMixed(doc, runs, textW, SPEC.bodySize, BODY_FONT);
+
+            // Widow/orphan control mirrors the plain-text path below.
+            if (WIDOW_ORPHAN.enabled && runLines.length > 0) {
+              let linesOnCurrentPage = 0;
+              let tempY = y;
+              for (let _i = 0; _i < runLines.length; _i++) {
+                if (tempY > maxY) break;
+                linesOnCurrentPage++;
+                tempY += SPEC.lineHeight;
+              }
+              const remainingLines = runLines.length - linesOnCurrentPage;
+              if (remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) {
+                if (linesOnCurrentPage > 0) {
+                  newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
+                  addPageNumber(bookPageNum + pagesUsed);
+                  y = bodyTopY(); resetBodyFont();
+                }
+              } else if (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0) {
+                newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
+                addPageNumber(bookPageNum + pagesUsed);
+                y = bodyTopY(); resetBodyFont();
+              }
+            }
+
+            for (const line of runLines) {
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              drawRunLine(doc, line, textX, y + BASELINE_OFFSET, SPEC.bodySize, BODY_FONT);
+              y += SPEC.lineHeight;
+            }
+            resetBodyFont();
+            y += SPEC.paraGap;
+            continue;
+          }
+
           const lines = wrapText(para, textW, SPEC.bodySize);
-          
+
           // Widow/orphan control
           if (WIDOW_ORPHAN.enabled && lines.length > 0) {
             // Check how many lines can fit on current page
@@ -1156,30 +1371,30 @@
               linesOnCurrentPage++;
               tempY += SPEC.lineHeight;
             }
-            
+
             const remainingLines = lines.length - linesOnCurrentPage;
-            
+
             // Widow prevention: if 1-2 lines would be left alone on next page
             if (remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) {
               // Force page break before this paragraph to keep it together
               if (linesOnCurrentPage > 0) {
-                newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
-                addPageNumber(bookPageNum + pagesUsed); 
+                newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
+                addPageNumber(bookPageNum + pagesUsed);
                 y = bodyTopY();
                 resetBodyFont();
               }
             }
-            
+
             // Orphan prevention: if only 1-2 lines would fit at bottom of current page
             else if (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0) {
               // Force page break to avoid orphaning just 1-2 lines
-              newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
-              addPageNumber(bookPageNum + pagesUsed); 
+              newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
+              addPageNumber(bookPageNum + pagesUsed);
               y = bodyTopY();
               resetBodyFont();
             }
           }
-          
+
           // Render all lines of the paragraph. Each line except the last is justified to
           // the full text width; the last line stays left-aligned (ragged right) per
           // industry convention so end-of-paragraph stretching doesn't leave awkward gaps.
@@ -1479,6 +1694,71 @@
       );
     }
 
+    // RichTextInput: drop-in body editor with a B / I / U + H2 / H3 toolbar.
+    // Stores the markdown-lite syntax that parseInlineRuns / classifyParagraph
+    // understand. Toolbar handlers either wrap the current selection in markers
+    // (B / I / U) or toggle a line prefix (H2 / H3) on the line containing
+    // the cursor.
+    function RichTextInput({ label, value, onChange, rows }) {
+      rows = rows || 8;
+      const taRef = React.useRef(null);
+
+      const wrapSelection = function(before, after) {
+        const ta = taRef.current; if (!ta) return;
+        const start = ta.selectionStart, end = ta.selectionEnd;
+        const selected = value.slice(start, end);
+        const newValue = value.slice(0, start) + before + selected + after + value.slice(end);
+        onChange(newValue);
+        requestAnimationFrame(function() {
+          ta.focus();
+          if (selected.length > 0) ta.setSelectionRange(start + before.length, end + before.length);
+          else ta.setSelectionRange(start + before.length, start + before.length);
+        });
+      };
+
+      const toggleLinePrefix = function(prefix) {
+        const ta = taRef.current; if (!ta) return;
+        const start = ta.selectionStart;
+        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+        const lineMatch = value.slice(lineStart).match(/^(#{1,6})\s/);
+        let newValue, newPos;
+        const target = prefix.trim();
+        if (lineMatch && lineMatch[1] === target) {
+          newValue = value.slice(0, lineStart) + value.slice(lineStart + lineMatch[0].length);
+          newPos = Math.max(lineStart, start - lineMatch[0].length);
+        } else if (lineMatch) {
+          newValue = value.slice(0, lineStart) + prefix + value.slice(lineStart + lineMatch[0].length);
+          newPos = start + (prefix.length - lineMatch[0].length);
+        } else {
+          newValue = value.slice(0, lineStart) + prefix + value.slice(lineStart);
+          newPos = start + prefix.length;
+        }
+        onChange(newValue);
+        requestAnimationFrame(function() { ta.focus(); ta.setSelectionRange(newPos, newPos); });
+      };
+
+      const btnStyle = { padding: "4px 10px", fontSize: 12, fontFamily: FONT, fontWeight: 600, background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border, borderRadius: 6, cursor: "pointer", minWidth: 28, lineHeight: 1.2 };
+      const divider = { width: 1, alignSelf: "stretch", background: BRAND.border, margin: "0 4px" };
+
+      return (
+        <div style={{ marginBottom: 16 }}>
+          {label && <label style={{ display: "block", fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 6, fontWeight: 500 }}>{label}</label>}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, padding: 6, background: BRAND.bgSubtle, border: "1px solid " + BRAND.border, borderBottom: "none", borderTopLeftRadius: 8, borderTopRightRadius: 8 }}>
+            <button type="button" title="Bold (wraps selection in **)" onClick={function() { wrapSelection("**", "**"); }} style={Object.assign({}, btnStyle, { fontWeight: 800 })}>B</button>
+            <button type="button" title="Italic (wraps selection in *)" onClick={function() { wrapSelection("*", "*"); }} style={Object.assign({}, btnStyle, { fontStyle: "italic" })}>I</button>
+            <button type="button" title="Underline (wraps selection in __)" onClick={function() { wrapSelection("__", "__"); }} style={Object.assign({}, btnStyle, { textDecoration: "underline" })}>U</button>
+            <div style={divider} />
+            <button type="button" title="Heading (adds ## to current line)" onClick={function() { toggleLinePrefix("## "); }} style={btnStyle}>H2</button>
+            <button type="button" title="Subheading (adds ### to current line)" onClick={function() { toggleLinePrefix("### "); }} style={btnStyle}>H3</button>
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
+          </div>
+          <textarea ref={taRef} value={value} onChange={function(e) { onChange(e.target.value); }} rows={rows}
+            style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
+        </div>
+      );
+    }
+
     function Button({ children, onClick, variant, disabled, style: extraStyle }) {
       variant = variant || "primary";
       const [hovered, setHovered] = useState(false);
@@ -1551,7 +1831,7 @@
               <Input label="Chapter Title" value={chapter.title} onChange={function(v) { onEdit(chapter.id, "title", v); }} placeholder="e.g. Discovering The Tinybook Client System" />
               <Input label="Epigraph (optional)" value={chapter.epigraph} onChange={function(v) { onEdit(chapter.id, "epigraph", v); }} placeholder="Opening quote for the chapter" />
               <Input label="Epigraph Attribution" value={chapter.epigraphAttribution} onChange={function(v) { onEdit(chapter.id, "epigraphAttribution", v); }} placeholder="e.g. Helen Hayes" />
-              <Input label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} multiline={true} rows={8} serif={true} />
+              <RichTextInput label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} rows={10} />
             </div>
           )}
         </div>
