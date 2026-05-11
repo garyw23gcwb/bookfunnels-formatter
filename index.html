@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.6",
+      version: "0.9.7",
       date: "2026-05-11",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -386,6 +386,31 @@
       return { letter: m[0].toUpperCase(), rest: para.slice(idx + 1) };
     }
 
+    // Back-matter detection. Returns true for chapter titles that are
+    // typically excluded from a book's table of contents in trade publishing
+    // (about the author, acknowledgments, bibliography, etc.). Used to set
+    // a sensible default for chapter.includeInToc; the user can still toggle
+    // any chapter manually in the Step 3 UI.
+    const BACK_MATTER_TITLES = [
+      "about the author", "about the authors",
+      "acknowledgments", "acknowledgements",
+      "bibliography", "references", "further reading",
+      "glossary", "index", "notes", "endnotes",
+      "colophon", "appendix",
+    ];
+    function isLikelyBackMatter(title) {
+      if (!title) return false;
+      const lower = String(title).toLowerCase().trim();
+      for (const bm of BACK_MATTER_TITLES) {
+        if (lower === bm) return true;
+        if (lower.startsWith(bm + ":")) return true;
+        if (lower.startsWith(bm + " ")) return true;
+        // Appendix often appears as "Appendix A: Foo" — match "appendix" prefix
+        if (bm === "appendix" && lower.startsWith("appendix")) return true;
+      }
+      return false;
+    }
+
     function detectChapters(text) {
       const lines = text.split(/\n/);
       const chapters = [];
@@ -425,7 +450,7 @@
               if (nextLine && !chapterPatterns.some(function(p) { return p.test(nextLine); })) { chapterTitle = nextLine; i = j; break; }
             }
           }
-          currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "" };
+          currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "", includeInToc: !isLikelyBackMatter(chapterTitle) };
           buffer = [];
           
           // Look ahead for epigraph (quoted text after chapter heading)
@@ -1433,9 +1458,13 @@
 
       // Compute the widest page number actually in this TOC so that short books
       // (single-digit pages) do not waste a two-digit reservation and truncate titles.
+      // Skip chapters flagged as excluded from the TOC (back matter like
+      // "About the Author", "Acknowledgments", etc.) — their pages still
+      // exist in the book but their rows do not appear in the TOC.
       doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11);
       let maxPageNumWidth = 0;
       for (let i = 0; i < chapters.length; i++) {
+        if (chapters[i].includeInToc === false) continue;
         const w = doc.getTextWidth(String(chapterPageNumbers[i]));
         if (w > maxPageNumWidth) maxPageNumWidth = w;
       }
@@ -1446,6 +1475,7 @@
 
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
+        if (ch.includeInToc === false) continue;
         // In the real book TOC, titles are shown without "Chapter X:" prefix
         const displayTitle = ch.title || ch.num;
         const pageNumStr = String(chapterPageNumbers[i]);
@@ -1932,12 +1962,17 @@
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
-        chapterFiles.push({ file: fname, title: ch.title || ch.num || ("Chapter " + (ci + 1)) });
+        chapterFiles.push({ file: fname, title: ch.title || ch.num || ("Chapter " + (ci + 1)), includeInToc: ch.includeInToc !== false });
       }
 
-      // 10. Navigation document (EPUB 3 requires this)
+      // 10. Navigation document (EPUB 3 requires this).
+      // Same filter as the PDF TOC — chapters flagged includeInToc=false
+      // (typically back matter: About the Author, Acknowledgments, etc.)
+      // still appear in the spine and render in the book, but they are
+      // omitted from the reader-facing table of contents.
       let navBody = '<nav epub:type="toc" id="toc">\n  <h1>Contents</h1>\n  <ol>\n';
       for (const cf of chapterFiles) {
+        if (!cf.includeInToc) continue;
         navBody += '    <li><a href="' + cf.file + '">' + esc(cf.title) + '</a></li>\n';
       }
       navBody += '  </ol>\n</nav>';
@@ -2192,7 +2227,11 @@
                   {chapter.num && <span style={{ color: BRAND.textMuted, fontWeight: 400 }}>{chapter.num} &middot; </span>}
                   {chapter.title || "Untitled"}
                 </div>
-                <div style={{ fontSize: 12, fontFamily: FONT, color: BRAND.textMuted, marginTop: 2 }}>{wordCount.toLocaleString()} words{chapter.epigraph ? " \u00b7 has epigraph" : ""}</div>
+                <div style={{ fontSize: 12, fontFamily: FONT, color: BRAND.textMuted, marginTop: 2 }}>
+                  {wordCount.toLocaleString()} words
+                  {chapter.epigraph ? " \u00b7 has epigraph" : ""}
+                  {chapter.includeInToc === false ? " \u00b7 hidden from TOC" : ""}
+                </div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -2206,6 +2245,23 @@
               <Input label="Chapter Title" value={chapter.title} onChange={function(v) { onEdit(chapter.id, "title", v); }} placeholder="e.g. Discovering The Tinybook Client System" />
               <Input label="Epigraph (optional)" value={chapter.epigraph} onChange={function(v) { onEdit(chapter.id, "epigraph", v); }} placeholder="Opening quote for the chapter" />
               <Input label="Epigraph Attribution" value={chapter.epigraphAttribution} onChange={function(v) { onEdit(chapter.id, "epigraphAttribution", v); }} placeholder="e.g. Helen Hayes" />
+
+              {/* Table of Contents inclusion. Default true; auto-detected to false
+                  for likely back-matter titles ("About the Author", "Acknowledgments",
+                  etc.) by detectChapters. User can toggle on any chapter. */}
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, fontSize: 13, fontFamily: FONT, color: BRAND.textSecondary, cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="checkbox"
+                  checked={chapter.includeInToc !== false}
+                  onChange={function(e) { onEdit(chapter.id, "includeInToc", e.target.checked); }}
+                  style={{ width: 16, height: 16, cursor: "pointer", accentColor: BRAND.accentDeep }}
+                />
+                <span>
+                  <span style={{ fontWeight: 600, color: BRAND.textPrimary }}>Include in Table of Contents</span>
+                  <span style={{ marginLeft: 8, color: BRAND.textMuted }}>· Uncheck for back matter (About the Author, Acknowledgments, etc.). The chapter still appears in the book and gets a page number — it just won't be listed in the TOC.</span>
+                </span>
+              </label>
+
               <RichTextInput label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} rows={10} />
             </div>
           )}
@@ -2352,7 +2408,7 @@
       };
       const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
       const handleRemoveChapter = function(id) { setChapters(function(prev) { return prev.filter(function(ch) { return ch.id !== id; }); }); };
-      const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "" }]); }); };
+      const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "", includeInToc: true }]); }); };
 
       const handleGenerate = async function() {
         setGenerating(true); setProgress("Starting..."); setError("");
