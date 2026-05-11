@@ -8,9 +8,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.8",
+      version: "0.7.9",
       date: "2026-05-11",
       changes: [
+        "0.7.9 - Backend keepers ported from the parallel v0.8.0 work track. No visible UI change. (1) Autosave: bookData, rawText, chapters, step and textSizePreset now persist to localStorage with a 400ms debounce and hydrate on first render, so a tab refresh or crash no longer wipes in-progress work. (2) Docx import robustness: flattenDocxHtml now recurses into nested section / div / article / main containers so headings buried below the top level of mammoth's output still surface (fixes the 'one chapter missing on real manuscripts' case). H3 headings preserved with a '### ' prefix in the flattened output (rendering of that prefix comes in v0.8.0). (3) pickDropCap() helper finds the first alphabetic character in a paragraph so paragraphs that open with a smart quote, numeral, em-dash or symbol still get a clean drop cap glyph instead of garbage. Applied in both the PDF dry-run and the actual render path. (4) Iframe height reporter: emits postMessage({type:'tinybook:height', height}) to the parent window on mount and on every resize, so a hosting page can auto-size the iframe embed. (5) CDN version pins: React 18.3.1, ReactDOM 18.3.1 and Babel standalone 7.25.6 are now pinned so surprise upstream releases can't break the tool.",
         "0.7.8 - Internal cleanup, no visible change. Removed two drift risks surfaced by the post-recto-fix audit: (1) Pass 1 and pass 2 both reset the y cursor after a page break to 'top margin + 30', but expressed it two different ways - pass 1 read SPEC.margins.recto.top directly, pass 2 read getMargins().top. Equal today, drift risk if margins ever go asymmetric. Both now call a single helper bodyTopY(). (2) calcOpeningHeight() hardcoded 252 and 192 for title and epigraph wrap widths. Now derives them from SPEC the same way pass 2 does.",
         "0.7.7 - Two fixes: (1) Reader Bonus page: headline padding now equal above and below (16pt each side) so the title sits visually balanced. (2) Chapter recto bug: pass 2 page-advance was 'if (!isRecto()) newPage(); newPage();' which always landed the chapter on a verso. Pass 1 (TOC page numbering) already assumed recto starts, so the rendered chapter and the TOC page number disagreed. Fixed by swapping the order: newPage() first to leave the previous content, then advance once more if needed to reach recto. Same fix applied to back-of-book CTA.",
         "0.7.6 - Reader Bonus page: rewrote vertical layout using visual edges instead of baselines. Old code added GAP_HEADER_TO_TITLE then drew the title at that y as its baseline, so the cap-height pushed up into the gap and only ~8pt of visible space remained. Likewise GAP_TITLE_TO_BODY measured baseline-to-baseline plus a full TITLE_LINE_H of advance, producing ~35pt visible gap. New code positions text by cap-top from the preceding visible edge, so the gap values match what you see. Set to 18pt above the title, 14pt between title and body, 20pt above the URL bar.",
@@ -141,11 +142,15 @@
     };
 
     // Convert mammoth HTML output to a plain-text form the chapter detector understands.
-    // Strategy: use a DOM parser to traverse nodes, emitting:
+    // Strategy: use a DOM parser and walk the tree, emitting:
     //   h1 -> "TITLE\n\n"                          (detected as chapter heading)
     //   h2 -> "## TITLE\n\n"                       (marked so render can style it)
+    //   h3 -> "### TITLE\n\n"                      (sub-subheading)
     //   p  -> "TEXT\n\n"                            (normal paragraph)
     //   br -> "\n"
+    //   section / div / article -> recurse into children (so headings buried
+    //     inside container elements still surface; mammoth sometimes wraps
+    //     them deeper than the top level on real-world manuscripts)
     //   all other tags -> inner text only (strip bold/italic/underline to plain)
     function flattenDocxHtml(html) {
       const parser = new DOMParser();
@@ -167,19 +172,31 @@
       }
 
       const parts = [];
-      for (const node of root.childNodes) {
-        if (node.nodeType !== 1) continue;
-        const tag = node.tagName;
-        const text = getText(node).trim();
-        if (!text) continue;
-        if (tag === "H1") {
-          parts.push(text);
-        } else if (tag === "H2") {
-          parts.push("## " + text);
-        } else {
-          parts.push(text);
+      const CONTAINER_TAGS = { SECTION: 1, DIV: 1, ARTICLE: 1, MAIN: 1 };
+
+      function walk(node) {
+        for (const child of node.childNodes) {
+          if (child.nodeType !== 1) continue;
+          const tag = child.tagName;
+          if (CONTAINER_TAGS[tag]) {
+            walk(child);
+            continue;
+          }
+          const text = getText(child).trim();
+          if (!text) continue;
+          if (tag === "H1") {
+            parts.push(text);
+          } else if (tag === "H2") {
+            parts.push("## " + text);
+          } else if (tag === "H3") {
+            parts.push("### " + text);
+          } else {
+            parts.push(text);
+          }
         }
       }
+
+      walk(root);
       return parts.join("\n\n").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     }
 
@@ -233,6 +250,20 @@
     function dropCapTuckedWidth(rawWidth, letter) {
       const frac = DROP_CAP_TUCK[letter] != null ? DROP_CAP_TUCK[letter] : 0;
       return rawWidth * (1 - frac);
+    }
+
+    // pickDropCap: find the first alphabetic character in a paragraph and return
+    // it (uppercased) along with the rest of the paragraph. Paragraphs that open
+    // with a smart quote, em-dash, numeral or symbol need this so the drop cap
+    // glyph is a real letter instead of a punctuation mark or numeral.
+    // Returns null if there is no alphabetic character, so the caller can fall
+    // back to rendering the paragraph without a drop cap.
+    function pickDropCap(para) {
+      if (!para) return null;
+      const m = para.match(/[A-Za-z]/);
+      if (!m) return null;
+      const idx = para.indexOf(m[0]);
+      return { letter: m[0].toUpperCase(), rest: para.slice(idx + 1) };
     }
 
     function detectChapters(text) {
@@ -758,13 +789,20 @@
           if (isFirstPara && para.length > 0) {
             // Drop cap takes ~3 lines at the narrow width, then continues at full width.
             // Must mirror the render path exactly so TOC page numbers stay accurate.
-            const dropLetter = para[0].toUpperCase();
+            const dc = pickDropCap(para);
+            if (!dc) {
+              // No alphabetic start - render as a plain paragraph in the dry run too.
+              const fl = doc.splitTextToSize(para, textW);
+              for (const line of fl) { if (y > maxY) { pages++; y = bodyTopY(); } y += SPEC.lineHeight; }
+              isFirstPara = false; y += SPEC.paraGap; continue;
+            }
+            const dropLetter = dc.letter;
             doc.setFont(BODY_FONT, "normal"); doc.setFontSize(getDropCapSize());
             const rawDropCapWidth = doc.getTextWidth(dropLetter);
             const dropCapWidth = dropCapTuckedWidth(rawDropCapWidth, dropLetter) + 5;
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
-            let remaining = para.slice(1);
+            let remaining = dc.rest;
             let lc = 0;
             while (lc < SPEC.dropCapLines && remaining.length > 0) {
               const nl = doc.splitTextToSize(remaining, narrowWidth);
@@ -1004,8 +1042,17 @@
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
           if (isFirstPara && para.length > 0) {
-            const dropLetter = para[0].toUpperCase();
-            const restText = para.slice(1);
+            const dc = pickDropCap(para);
+            if (!dc) {
+              // No alphabetic character to use as a drop cap (pure numerals,
+              // symbols, etc). Fall through to the normal paragraph rendering
+              // path instead of drawing a garbage glyph.
+              isFirstPara = false;
+              pi--; // re-process this paragraph in the non-first-para branch
+              continue;
+            }
+            const dropLetter = dc.letter;
+            const restText = dc.rest;
 
             // Drop cap positioning:
             // Typographic rule is that the top of the drop cap's cap-height should sit flush
@@ -1534,19 +1581,71 @@
 
     /* ---- Main App ---- */
 
+    // Key under which Step 1-3 form state is mirrored to localStorage. Bumping
+    // this string would invalidate any in-progress work for existing users, so
+    // do not change it casually.
+    const AUTOSAVE_KEY = "tinybook-formatter-state";
+
     function TinybookFormatter() {
-      const [step, setStep] = useState(0);
+      // Hydrate previously-saved form state on first render so a tab refresh,
+      // crash, or accidental close does not wipe an in-progress book.
+      // Wrapped in useMemo so the localStorage read only happens once per
+      // component instance, not on every render.
+      const initialSaved = React.useMemo(function() {
+        try {
+          const raw = localStorage.getItem(AUTOSAVE_KEY);
+          return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+      }, []);
+
+      const [step, setStep] = useState(initialSaved && typeof initialSaved.step === "number" ? initialSaved.step : 0);
       const [generating, setGenerating] = useState(false);
       const [progress, setProgress] = useState("");
       const [error, setError] = useState("");
       const [pdfUrl, setPdfUrl] = useState(null);
       const [epubUrl, setEpubUrl] = useState(null);
-      const [textSizePreset, setTextSizePreset] = useState('default');
-      const [bookData, setBookData] = useState({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
-      const [rawText, setRawText] = useState("");
-      const [chapters, setChapters] = useState([]);
+      const [textSizePreset, setTextSizePreset] = useState(initialSaved && initialSaved.textSizePreset ? initialSaved.textSizePreset : 'default');
+      const [bookData, setBookData] = useState(initialSaved && initialSaved.bookData ? initialSaved.bookData : { title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
+      const [rawText, setRawText] = useState(initialSaved && typeof initialSaved.rawText === "string" ? initialSaved.rawText : "");
+      const [chapters, setChapters] = useState(initialSaved && Array.isArray(initialSaved.chapters) ? initialSaved.chapters : []);
 
       const [showChangelog, setShowChangelog] = useState(false);
+
+      // Autosave: 400ms debounced write of Step 1-3 form state to localStorage.
+      // Triggered every time bookData / rawText / chapters / step /
+      // textSizePreset changes. Wrapped in try/catch because localStorage can
+      // throw (private mode, quota exceeded, disabled).
+      React.useEffect(function() {
+        const handle = setTimeout(function() {
+          try {
+            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
+              step: step,
+              textSizePreset: textSizePreset,
+              bookData: bookData,
+              rawText: rawText,
+              chapters: chapters,
+            }));
+          } catch (e) { /* ignore — disabled, full, or private mode */ }
+        }, 400);
+        return function() { clearTimeout(handle); };
+      }, [step, textSizePreset, bookData, rawText, chapters]);
+
+      // Iframe height reporter: when this app is embedded inside an iframe on
+      // a hosting page, post the current document height to the parent on
+      // mount and on every resize so the parent can auto-size the iframe.
+      // Payload: { type: "tinybook:height", height: <number> }.
+      React.useEffect(function() {
+        if (typeof window === "undefined" || window === window.parent) return;
+        function report() {
+          const h = document.documentElement.scrollHeight || document.body.scrollHeight;
+          try { window.parent.postMessage({ type: "tinybook:height", height: h }, "*"); } catch (e) { /* cross-origin parent may reject */ }
+        }
+        report();
+        const obs = (typeof ResizeObserver !== "undefined") ? new ResizeObserver(report) : null;
+        if (obs) obs.observe(document.documentElement);
+        window.addEventListener("load", report);
+        return function() { if (obs) obs.disconnect(); window.removeEventListener("load", report); };
+      }, []);
 
       const loadSampleData = function() {
         setBookData({
