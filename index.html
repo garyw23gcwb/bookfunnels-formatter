@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.7",
+      version: "0.9.8",
       date: "2026-05-11",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -2247,19 +2247,19 @@
               <Input label="Epigraph Attribution" value={chapter.epigraphAttribution} onChange={function(v) { onEdit(chapter.id, "epigraphAttribution", v); }} placeholder="e.g. Helen Hayes" />
 
               {/* Table of Contents inclusion. Default true; auto-detected to false
-                  for likely back-matter titles ("About the Author", "Acknowledgments",
-                  etc.) by detectChapters. User can toggle on any chapter. */}
-              <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, fontSize: 13, fontFamily: FONT, color: BRAND.textSecondary, cursor: "pointer", userSelect: "none" }}>
+                  for likely back-matter titles by detectChapters. User can toggle. */}
+              <label
+                title="Uncheck for back matter (About the Author, Acknowledgments, etc.). The chapter still renders in the book and gets a page number — it just won't be listed in the Contents page."
+                style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "4px 0", fontSize: 13, fontFamily: FONT, color: BRAND.textPrimary, cursor: "pointer", userSelect: "none" }}
+              >
                 <input
                   type="checkbox"
                   checked={chapter.includeInToc !== false}
                   onChange={function(e) { onEdit(chapter.id, "includeInToc", e.target.checked); }}
-                  style={{ width: 16, height: 16, cursor: "pointer", accentColor: BRAND.accentDeep }}
+                  style={{ width: 14, height: 14, margin: 0, cursor: "pointer", accentColor: BRAND.accentDeep }}
                 />
-                <span>
-                  <span style={{ fontWeight: 600, color: BRAND.textPrimary }}>Include in Table of Contents</span>
-                  <span style={{ marginLeft: 8, color: BRAND.textMuted }}>· Uncheck for back matter (About the Author, Acknowledgments, etc.). The chapter still appears in the book and gets a page number — it just won't be listed in the TOC.</span>
-                </span>
+                <span>Include in Table of Contents</span>
+                <span style={{ color: BRAND.textMuted, fontSize: 12 }}>(uncheck for back matter)</span>
               </label>
 
               <RichTextInput label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} rows={10} />
