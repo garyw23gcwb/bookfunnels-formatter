@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.9",
+      version: "0.10.0",
       date: "2026-05-11",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -381,6 +381,86 @@
       });
     }
 
+    // =====================================================================
+    // Image helpers. Body images use a markdown-style marker as their own
+    // paragraph:  ![alt text](img-id)
+    // The image bytes are kept per-chapter in chapter.images[id] = {
+    //   dataUrl, filename, naturalWidth, naturalHeight
+    // } and rendered as block elements between paragraphs (centered,
+    // sized to fit the text column, aspect ratio preserved). Storage is
+    // session-only by design — autosave strips chapter.images before
+    // writing to localStorage, because base64 PNGs blow the 5-10 MB quota
+    // after just a couple of photos.
+    // =====================================================================
+
+    // Extract the jsPDF-friendly format string, file extension and MIME type
+    // from a data URL like "data:image/png;base64,..."
+    function getImageFormatFromDataUrl(dataUrl) {
+      const s = String(dataUrl || "");
+      if (s.startsWith("data:image/png"))  return { jsPdfFormat: "PNG",  ext: "png",  mime: "image/png"  };
+      if (s.startsWith("data:image/jpeg")) return { jsPdfFormat: "JPEG", ext: "jpg",  mime: "image/jpeg" };
+      if (s.startsWith("data:image/jpg"))  return { jsPdfFormat: "JPEG", ext: "jpg",  mime: "image/jpeg" };
+      if (s.startsWith("data:image/gif"))  return { jsPdfFormat: "GIF",  ext: "gif",  mime: "image/gif"  };
+      if (s.startsWith("data:image/webp")) return { jsPdfFormat: "WEBP", ext: "webp", mime: "image/webp" };
+      return { jsPdfFormat: "PNG", ext: "png", mime: "image/png" };
+    }
+
+    // Decide the rendered width/height for an image, fitting it inside the
+    // available text column and a per-image max-height budget while keeping
+    // the natural aspect ratio. Falls back gracefully if dimensions are
+    // missing (e.g. the image hasn't loaded yet).
+    function computeImageRenderSize(naturalWidth, naturalHeight, maxWidth, maxHeight) {
+      const nw = Number(naturalWidth) || 0;
+      const nh = Number(naturalHeight) || 0;
+      if (nw <= 0 || nh <= 0) {
+        return { width: maxWidth, height: Math.min(maxHeight, maxWidth * 0.75) };
+      }
+      const aspect = nw / nh;
+      // Fit to width first, never upscale beyond the natural pixel size.
+      let w = Math.min(nw, maxWidth);
+      let h = w / aspect;
+      // If that still overshoots the height budget, fit to height instead.
+      if (h > maxHeight) {
+        h = maxHeight;
+        w = h * aspect;
+      }
+      return { width: w, height: h };
+    }
+
+    // Decode a "data:image/...;base64,..." URL into a Uint8Array of bytes.
+    // Used by the EPUB writer to drop each image into OEBPS/images/.
+    function dataUrlToBytes(dataUrl) {
+      const s = String(dataUrl || "");
+      const comma = s.indexOf(",");
+      const base64 = comma >= 0 ? s.slice(comma + 1) : s;
+      const binary = atob(base64);
+      const out = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+      return out;
+    }
+
+    // Read an uploaded File / Blob and resolve with its data URL.
+    function readFileAsDataUrl(file) {
+      return new Promise(function(resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function() { resolve(reader.result); };
+        reader.onerror = function() { reject(reader.error || new Error("FileReader failed")); };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // Probe the natural pixel dimensions of an image data URL by loading it
+    // into an off-DOM Image element. Resolves with {width, height} or zeros
+    // if the image fails to decode.
+    function getImageNaturalSize(dataUrl) {
+      return new Promise(function(resolve) {
+        const img = new window.Image();
+        img.onload = function() { resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
+        img.onerror = function() { resolve({ width: 0, height: 0 }); };
+        img.src = dataUrl;
+      });
+    }
+
     // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
     // width. ALL VALUES ARE ZERO. The previous tuck table tried to pull body text into
     // letters with empty space on the right (L, T, F, P, Y, etc.) but this caused
@@ -483,7 +563,7 @@
               if (nextLine && !chapterPatterns.some(function(p) { return p.test(nextLine); })) { chapterTitle = nextLine; i = j; break; }
             }
           }
-          currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "", includeInToc: !isLikelyBackMatter(chapterTitle) };
+          currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "", includeInToc: !isLikelyBackMatter(chapterTitle), images: {} };
           buffer = [];
           
           // Look ahead for epigraph (quoted text after chapter heading)
@@ -650,6 +730,12 @@
     function classifyParagraph(p) {
       if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
       if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
+      // Image marker as a whole paragraph: ![alt text](img-id)
+      // The marker is recognized only when it occupies the entire paragraph
+      // (after whitespace collapse) so inline accidental markers within prose
+      // do not turn into floating images.
+      const imgMatch = p.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if (imgMatch) return { type: "image", alt: imgMatch[1], imageId: imgMatch[2] };
       return { type: "body", text: p };
     }
 
@@ -1376,6 +1462,28 @@
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
 
+          // Image block. Look up the image in chapter.images, compute its
+          // rendered size, and reserve that vertical space. If it would
+          // overflow the current page, push it to a new page.
+          if (cls.type === "image") {
+            const img = ch.images && ch.images[cls.imageId];
+            if (!img || !img.dataUrl) {
+              // Missing image — reserve a single body line for an inline
+              // placeholder so the dry run still matches the render.
+              if (y > maxY) { pages++; y = bodyTopY(); }
+              y += SPEC.lineHeight + SPEC.paraGap;
+              continue;
+            }
+            const maxImageW = textW;
+            const maxImageH = (SPEC.pageH - bodyTopY() - 50) * 0.85;
+            const size = computeImageRenderSize(img.naturalWidth, img.naturalHeight, maxImageW, maxImageH);
+            if (y + size.height > maxY) {
+              pages++; y = bodyTopY();
+            }
+            y += size.height + SPEC.paraGap;
+            continue;
+          }
+
           // H2 / H3 headings. Smart break: never let a heading dangle alone at
           // the bottom of a page — reserve ~2 body lines beneath it.
           if (cls.type === "h2" || cls.type === "h3") {
@@ -1685,6 +1793,47 @@
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
 
+          // Image block. Mirrors the pass-1 sizing logic so TOC page numbers
+          // stay accurate. Center horizontally inside the text column, draw
+          // via jsPDF's addImage. If the image won't fit on the current page
+          // do a clean page break first (header + footer follow).
+          if (cls.type === "image") {
+            const img = ch.images && ch.images[cls.imageId];
+            if (!img || !img.dataUrl) {
+              // Missing image — draw a small placeholder text in italic so
+              // the author sees something is wrong, and advance one line.
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
+              doc.text("[missing image: " + cls.imageId + "]", textX, y + BASELINE_OFFSET);
+              doc.setTextColor(30); resetBodyFont();
+              y += SPEC.lineHeight + SPEC.paraGap;
+              continue;
+            }
+            const maxImageW = textW;
+            const maxImageH = (SPEC.pageH - bodyTopY() - 50) * 0.85;
+            const size = computeImageRenderSize(img.naturalWidth, img.naturalHeight, maxImageW, maxImageH);
+            if (y + size.height > maxY) {
+              newPage(); pagesUsed++;
+              addRunningHeader(ch.title || ch.num || "");
+              addPageNumber(bookPageNum + pagesUsed);
+              y = bodyTopY(); resetBodyFont();
+            }
+            const drawX = textX + (textW - size.width) / 2;
+            const fmt = getImageFormatFromDataUrl(img.dataUrl);
+            try {
+              doc.addImage(img.dataUrl, fmt.jsPdfFormat, drawX, y, size.width, size.height);
+            } catch (e) {
+              // jsPDF can throw on unsupported formats or malformed data.
+              // Fall back to the inline placeholder so the dry run / render
+              // page counts stay aligned.
+              doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
+              doc.text("[image error: " + cls.imageId + "]", textX, y + BASELINE_OFFSET);
+              doc.setTextColor(30); resetBodyFont();
+            }
+            y += size.height + SPEC.paraGap;
+            continue;
+          }
+
           // H2 / H3 headings. Reserve at least 2 body lines beneath so the
           // heading does not dangle alone at the bottom of a page.
           if (cls.type === "h2" || cls.type === "h3") {
@@ -1884,6 +2033,9 @@
         'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; page-break-after: avoid; break-after: avoid; }',
         'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
         'p.epigraph { font-style: italic; margin: 1.5em 2em; text-align: center; }',
+        // Centered block image (body image markers ![alt](img-id))
+        'p.figure { text-align: center; margin: 1.5em 0; }',
+        'p.figure img { max-width: 100%; height: auto; }',
         'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
@@ -1972,6 +2124,11 @@
 
       // 9. Chapters - one XHTML file each. Preserve subheadings (## marker) as <h2>.
       const chapterFiles = [];
+      // Images referenced from any chapter body are accumulated here and
+      // written out (once each) into OEBPS/images/ after the chapter loop.
+      // Keyed by image id so the same image referenced from multiple
+      // chapters is only packaged once.
+      const imagesToPackage = {};
       for (let ci = 0; ci < chapters.length; ci++) {
         const ch = chapters[ci];
         let body = '';
@@ -1990,6 +2147,27 @@
         }
         const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
         for (const p of paragraphs) {
+          // Image marker as a whole paragraph: ![alt](img-id) — emit an <img> tag
+          // inside a centered <p>, and queue the image bytes for packaging
+          // into OEBPS/images/.
+          const imgMatch = p.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+          if (imgMatch) {
+            const alt = imgMatch[1];
+            const id = imgMatch[2];
+            const img = ch.images && ch.images[id];
+            if (img && img.dataUrl) {
+              const fmt = getImageFormatFromDataUrl(img.dataUrl);
+              const filename = id + "." + fmt.ext;
+              // Track this image for the manifest and the OEBPS/images/ zip entry.
+              imagesToPackage[id] = { dataUrl: img.dataUrl, filename: filename, mime: fmt.mime };
+              body += '  <p class="figure"><img src="images/' + filename + '" alt="' + esc(alt) + '" /></p>\n';
+            } else {
+              // Missing image — emit a small placeholder note instead so the
+              // EPUB still validates and the reader sees the gap.
+              body += '  <p class="figure"><em>[missing image: ' + esc(id) + ']</em></p>\n';
+            }
+            continue;
+          }
           if (p.startsWith("## ")) body += '  <h2>' + esc(p.slice(3).trim()) + '</h2>\n';
           else body += '  <p>' + esc(p) + '</p>\n';
         }
@@ -1997,6 +2175,17 @@
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
         chapterFiles.push({ file: fname, title: ch.title || ch.num || ("Chapter " + (ci + 1)), includeInToc: ch.includeInToc !== false });
       }
+
+      // Write image bytes and collect manifest entries for every referenced
+      // image. Done after the chapter loop so we have the deduped set.
+      const imageManifestItems = [];
+      Object.keys(imagesToPackage).forEach(function(id) {
+        const info = imagesToPackage[id];
+        try {
+          oebps.file("images/" + info.filename, dataUrlToBytes(info.dataUrl));
+          imageManifestItems.push('    <item id="img-' + id + '" href="images/' + info.filename + '" media-type="' + info.mime + '"/>');
+        } catch (e) { /* skip malformed image */ }
+      });
 
       // 10. Navigation document (EPUB 3 requires this).
       // Same filter as the PDF TOC — chapters flagged includeInToc=false
@@ -2022,7 +2211,7 @@
         '    <item id="css" href="styles.css" media-type="text/css"/>',
         '    <item id="titlepage" href="titlepage.xhtml" media-type="application/xhtml+xml"/>',
         '    <item id="copyright" href="copyright.xhtml" media-type="application/xhtml+xml"/>',
-      ];
+      ].concat(imageManifestItems);
       const spineItems = [
         '    <itemref idref="titlepage"/>',
         '    <itemref idref="copyright"/>',
@@ -2123,9 +2312,46 @@
     // understand. Toolbar handlers either wrap the current selection in markers
     // (B / I / U) or toggle a line prefix (H2 / H3) on the line containing
     // the cursor.
-    function RichTextInput({ label, value, onChange, rows }) {
+    function RichTextInput({ label, value, onChange, rows, onImageUpload }) {
       rows = rows || 8;
       const taRef = React.useRef(null);
+      const fileInputRef = React.useRef(null);
+      const [imageBusy, setImageBusy] = useState(false);
+
+      // Insert a block image marker at the current cursor position, surrounded
+      // by blank lines so it parses as its own paragraph. Asks the parent
+      // (ChapterCard) to actually stash the bytes and assign an id.
+      const handleImagePick = function(file) {
+        if (!file || !onImageUpload) return;
+        setImageBusy(true);
+        Promise.resolve(onImageUpload(file)).then(function(meta) {
+          if (!meta || !meta.id) return;
+          const alt = meta.alt || "";
+          const marker = "![" + alt + "](" + meta.id + ")";
+          const ta = taRef.current; if (!ta) { setImageBusy(false); return; }
+          const start = ta.selectionStart || 0;
+          const end = ta.selectionEnd || 0;
+          const before = value.slice(0, start);
+          const after = value.slice(end);
+          // Ensure blank line above and below so the marker becomes its own paragraph.
+          const leftPad = (before.length === 0 || /\n\n$/.test(before)) ? "" : (before.endsWith("\n") ? "\n" : "\n\n");
+          const rightPad = (after.length === 0 || /^\n\n/.test(after)) ? "" : (after.startsWith("\n") ? "\n" : "\n\n");
+          const insertion = leftPad + marker + rightPad;
+          const newValue = before + insertion + after;
+          onChange(newValue);
+          const newPos = start + insertion.length;
+          requestAnimationFrame(function() {
+            const t = taRef.current; if (!t) return;
+            t.focus({ preventScroll: true });
+            try { t.setSelectionRange(newPos, newPos); } catch (e) {}
+          });
+        }).catch(function(e) {
+          console.warn("Image upload failed:", e);
+        }).then(function() {
+          setImageBusy(false);
+          if (fileInputRef.current) fileInputRef.current.value = "";
+        });
+      };
 
       const wrapSelection = function(before, after) {
         const ta = taRef.current; if (!ta) return;
@@ -2193,6 +2419,31 @@
             <div style={divider} />
             <button type="button" title="Heading (adds ## to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("## "); }} style={btnStyle}>H2</button>
             <button type="button" title="Subheading (adds ### to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("### "); }} style={btnStyle}>H3</button>
+            {onImageUpload && <div style={divider} />}
+            {onImageUpload && (
+              <button
+                type="button"
+                title="Insert image at cursor (PNG or JPEG). Renders centered between paragraphs in the PDF and EPUB."
+                onMouseDown={swallowFocus}
+                onClick={function() { if (fileInputRef.current) fileInputRef.current.click(); }}
+                disabled={imageBusy}
+                style={Object.assign({}, btnStyle, { opacity: imageBusy ? 0.5 : 1 })}
+              >
+                {imageBusy ? "…" : "+ Image"}
+              </button>
+            )}
+            {onImageUpload && (
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                onChange={function(e) {
+                  const f = e.target.files && e.target.files[0];
+                  if (f) handleImagePick(f);
+                }}
+                style={{ display: "none" }}
+              />
+            )}
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
           </div>
@@ -2295,7 +2546,32 @@
                 <span style={{ color: BRAND.textMuted, fontSize: 12 }}>(uncheck for back matter)</span>
               </label>
 
-              <RichTextInput label="Body Text" value={chapter.body} onChange={function(v) { onEdit(chapter.id, "body", v); }} rows={10} />
+              <RichTextInput
+                label="Body Text"
+                value={chapter.body}
+                onChange={function(v) { onEdit(chapter.id, "body", v); }}
+                rows={10}
+                onImageUpload={async function(file) {
+                  // Read the file, probe its natural dimensions, stash it in
+                  // chapter.images under a freshly-generated id. Resolves with
+                  // { id, alt } so the RichTextInput can drop the marker
+                  // into the body at the cursor.
+                  const dataUrl = await readFileAsDataUrl(file);
+                  const dims = await getImageNaturalSize(dataUrl);
+                  const id = "img-" + Math.random().toString(36).slice(2, 8);
+                  const altDefault = (file.name || "image").replace(/\.[^.]+$/, "");
+                  const newImages = Object.assign({}, chapter.images || {}, {
+                    [id]: {
+                      dataUrl: dataUrl,
+                      filename: file.name || "",
+                      naturalWidth: dims.width,
+                      naturalHeight: dims.height,
+                    },
+                  });
+                  onEdit(chapter.id, "images", newImages);
+                  return { id: id, alt: altDefault };
+                }}
+              />
             </div>
           )}
         </div>
@@ -2368,15 +2644,25 @@
       // Triggered every time bookData / rawText / chapters / step /
       // textSizePreset changes. Wrapped in try/catch because localStorage can
       // throw (private mode, quota exceeded, disabled).
+      // Image bytes (chapter.images data URLs) are stripped before save —
+      // they're session-only by design because a few base64 PNGs would blow
+      // the 5-10 MB origin quota. The body-text markers `![alt](img-id)`
+      // are still saved, so on reload the user only re-uploads images, not
+      // the surrounding text.
       React.useEffect(function() {
         const handle = setTimeout(function() {
           try {
+            const chaptersForSave = chapters.map(function(c) {
+              const out = Object.assign({}, c);
+              delete out.images;
+              return out;
+            });
             localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
               step: step,
               textSizePreset: textSizePreset,
               bookData: bookData,
               rawText: rawText,
-              chapters: chapters,
+              chapters: chaptersForSave,
             }));
           } catch (e) { /* ignore — disabled, full, or private mode */ }
         }, 400);
@@ -2441,7 +2727,7 @@
       };
       const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
       const handleRemoveChapter = function(id) { setChapters(function(prev) { return prev.filter(function(ch) { return ch.id !== id; }); }); };
-      const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "", includeInToc: true }]); }); };
+      const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "", includeInToc: true, images: {} }]); }); };
 
       const handleGenerate = async function() {
         setGenerating(true); setProgress("Starting..."); setError("");
