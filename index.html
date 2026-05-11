@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.4",
+      version: "0.9.5",
       date: "2026-05-11",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -278,18 +278,18 @@
     // applications encode breaks differently and we want consistent state.
     //   \r\n     -> \n      (Windows / Word for Windows)
     //   \r       -> \n      (legacy classic Mac)
-    //       -> \n      (Unicode line separator — some rich text editors)
-    //       -> \n\n    (Unicode paragraph separator — Word, Google Docs)
+    //   \u2028   -> \n      (Unicode line separator — some rich text editors)
+    //   \u2029   -> \n\n    (Unicode paragraph separator — Word, Google Docs)
     function normalizeLineEndings(text) {
       return String(text == null ? "" : text)
         .replace(/\r\n/g, "\n")
         .replace(/\r/g, "\n")
-        .replace(/ /g, "\n")
-        .replace(/ /g, "\n\n");
+        .replace(/\u2028/g, "\n")
+        .replace(/\u2029/g, "\n\n");
     }
 
     // Defensive paste handler. Some clipboard sources put line breaks on the
-    // clipboard as something other than \n: \r\n from Word,  /
+    // clipboard as something other than \n: \r\n from Word, \u2028/
     // from Google Docs, etc. Browsers usually normalize these into a textarea
     // but not always (varies by browser version, by whether the source put
     // plain text or HTML on the clipboard, etc.). We intercept the paste,
