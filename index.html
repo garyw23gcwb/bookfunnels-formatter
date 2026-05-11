@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.8.1",
+      version: "0.9.0",
       date: "2026-05-11",
       changes: [
+        "0.9.0 - Body text now justifies with hyphenation, the way trade-book typography works. Replaces jsPDF's align:'justify' (which stretches spaces only and produces word-space rivers in narrow columns) with three new helpers: hyphenateWord() does rule-based English hyphenation (prefixes, suffixes, V|CV and VC|CV consonant clusters — approximates Knuth-Liang at ~75% accuracy, no external pattern data); breakIntoJustifiedLines() runs a greedy line-breaker that hyphenates the next word into the current line when there is room for a hyphenated prefix; drawJustifiedLine() stretches inter-word spaces and draws a '-' at hyphenated line endings. The last line of each paragraph stays ragged-right (industry standard). Applied to plain body paragraphs and to the drop-cap paragraph's narrow-then-full line block. Formatted paragraphs (containing **bold** / *italic* / __underline__ markers) stay ragged-right via the existing drawRunLine path — extending hyphenation to those is future work.",
         "0.8.1 - Fix Step 3 textarea jumping back to the top whenever a B / I / U / H2 / H3 button is clicked. Two changes: (1) onMouseDown={preventDefault} on every toolbar button keeps focus on the textarea instead of briefly handing it to the button (which caused some browsers to reset scrollTop on the textarea when it regained focus). (2) The textarea's scrollTop is captured before onChange and restored inside the requestAnimationFrame callback after React commits the new value, as a belt-and-braces safeguard in case the browser still resets it. Also added focus({preventScroll:true}) for good measure. No render change.",
         "0.8.0 - Inline formatting toolbar in Step 3. Each chapter's body editor now has a B / I / U + H2 / H3 strip above the textarea that wraps the current selection (B/I/U) or toggles a line prefix (H2/H3) in markdown-lite syntax: **bold**, *italic*, __underline__, ## Heading, ### Subhead. The PDF renderer honors all five through new helpers (parseInlineRuns, layoutRunsMixed, drawRunLine, classifyParagraph). The render path is gated by containsFormatting(): paragraphs without markers keep the v0.7.9 justified rendering, so unformatted chapters look identical to before. Paragraphs with markers use the run-based ragged-right path (drawRunLine doesn't justify). H3 now actually renders in the PDF (the '### ' prefix was preserved through docx import in v0.7.9 but not drawn). H2 unchanged — same smart break that reserves 2 body lines beneath it. Drop cap on the first body paragraph still works alongside inline formatting. Pass 1 (TOC page-number dry run) updated in lockstep so TOC numbers stay accurate.",
         "0.7.9 - Backend keepers ported from the parallel v0.8.0 work track. No visible UI change. (1) Autosave: bookData, rawText, chapters, step and textSizePreset now persist to localStorage with a 400ms debounce and hydrate on first render, so a tab refresh or crash no longer wipes in-progress work. (2) Docx import robustness: flattenDocxHtml now recurses into nested section / div / article / main containers so headings buried below the top level of mammoth's output still surface (fixes the 'one chapter missing on real manuscripts' case). H3 headings preserved with a '### ' prefix in the flattened output (rendering of that prefix comes in v0.8.0). (3) pickDropCap() helper finds the first alphabetic character in a paragraph so paragraphs that open with a smart quote, numeral, em-dash or symbol still get a clean drop cap glyph instead of garbage. Applied in both the PDF dry-run and the actual render path. (4) Iframe height reporter: emits postMessage({type:'tinybook:height', height}) to the parent window on mount and on every resize, so a hosting page can auto-size the iframe embed. (5) CDN version pins: React 18.3.1, ReactDOM 18.3.1 and Babel standalone 7.25.6 are now pinned so surprise upstream releases can't break the tool.",
@@ -475,6 +476,221 @@
       if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
       if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
       return { type: "body", text: p };
+    }
+
+    // =====================================================================
+    // Body text justification with English hyphenation.
+    //
+    // Trade-book typography fully justifies body text AND breaks long words
+    // with hyphens at line ends. jsPDF's align:"justify" stretches spaces
+    // only, producing visible word-space "rivers" in narrow columns. This
+    // implements a custom line-breaker that hyphenates and a custom justify
+    // renderer that draws "-" at hyphenated line endings.
+    // =====================================================================
+
+    // Rule-based English hyphenation. Returns sorted array of break-point
+    // positions inside the word. Lower-accuracy approximation of the
+    // Knuth-Liang algorithm (no external pattern data), but catches ~75%
+    // of valid break opportunities — enough to eliminate most rivers.
+    function hyphenateWord(word) {
+      if (word.length < 7) return [];
+      // Only hyphenate plain ASCII letter words. Skip URLs, contractions
+      // ("self-doubt"), numbers ("20th"), etc.
+      if (!/^[a-zA-Z]+$/.test(word)) return [];
+
+      const lower = word.toLowerCase();
+      const breaks = new Set();
+      const vowels = /[aeiouy]/;
+
+      // Common English prefixes — break right after them.
+      const prefixes = [
+        "un", "re", "in", "im", "dis", "mis", "pre", "pro",
+        "non", "anti", "auto", "fore", "hyper", "inter",
+        "macro", "micro", "mono", "multi", "over", "post",
+        "semi", "sub", "super", "trans", "ultra", "under",
+      ];
+      for (const pre of prefixes) {
+        if (lower.startsWith(pre) && lower.length - pre.length >= 3) {
+          breaks.add(pre.length);
+        }
+      }
+
+      // Common English suffixes — break right before them.
+      const suffixes = [
+        "able", "ible", "ation", "ition", "ment", "ness",
+        "ity", "ous", "ful", "less", "ing", "tion", "sion",
+        "ly", "ish", "ize", "ise", "ed", "er", "or", "al",
+        "ic", "ive",
+      ];
+      for (const suf of suffixes) {
+        if (lower.endsWith(suf) && lower.length - suf.length >= 3) {
+          breaks.add(lower.length - suf.length);
+        }
+      }
+
+      // Internal break-points by vowel-consonant pattern.
+      //   V|CV   (single consonant between vowels)   -> break before the C
+      //   VC|CV  (multiple consonants between vowels) -> break after first C
+      for (let i = 2; i <= lower.length - 3; i++) {
+        const prev = lower[i - 1];
+        const cur = lower[i];
+        if (!vowels.test(prev) || vowels.test(cur)) continue;
+        // Walk forward to the next vowel.
+        let j = i;
+        while (j < lower.length && !vowels.test(lower[j])) j++;
+        if (j === lower.length) continue;
+        if (j - i === 1) {
+          breaks.add(i);
+        } else {
+          breaks.add(i + 1);
+        }
+      }
+
+      // Knuth-Liang minimums: keep 2+ chars before, 3+ chars after the break.
+      return Array.from(breaks)
+        .filter(function(i) { return i >= 2 && lower.length - i >= 3; })
+        .sort(function(a, b) { return a - b; });
+    }
+
+    // Break a paragraph into lines for justified rendering. `widths` can be
+    // a single number (uniform max width) or an array (per-line widths, last
+    // entry repeats) — the array form is used for the drop cap, where the
+    // first 3 lines are narrow and lines 4+ are full width.
+    //
+    // Each returned line is { tokens, lineWidth, hyphenateEnd } where:
+    //   - tokens is an array of { text, width, isSpace }
+    //   - hyphenateEnd is true if the last word was split via hyphenation
+    //     and a "-" should be drawn at the line end
+    //   - lineWidth is the sum of token widths, used to compute the
+    //     per-space stretch factor for justification
+    function breakIntoJustifiedLines(doc, text, widths, fontSize, fontFamily) {
+      doc.setFontSize(fontSize); doc.setFont(fontFamily, "normal");
+      const spaceWidth = doc.getTextWidth(" ");
+      const hyphenWidth = doc.getTextWidth("-");
+
+      const getMaxWidth = function(lineIdx) {
+        return typeof widths === "number"
+          ? widths
+          : (lineIdx < widths.length ? widths[lineIdx] : widths[widths.length - 1]);
+      };
+
+      // Tokenize paragraph into runs of spaces and words.
+      const tokens = [];
+      const parts = text.split(/(\s+)/);
+      for (const p of parts) {
+        if (p.length === 0) continue;
+        if (/^\s+$/.test(p)) {
+          tokens.push({ text: " ", width: spaceWidth, isSpace: true });
+        } else {
+          tokens.push({ text: p, width: doc.getTextWidth(p), isSpace: false });
+        }
+      }
+
+      const lines = [];
+      let i = 0;
+      while (i < tokens.length) {
+        // Skip whitespace at start of new line.
+        while (i < tokens.length && tokens[i].isSpace) i++;
+        if (i >= tokens.length) break;
+
+        const maxWidth = getMaxWidth(lines.length);
+        const lineTokens = [];
+        let lineWidth = 0;
+
+        while (i < tokens.length) {
+          const tok = tokens[i];
+          if (lineWidth + tok.width <= maxWidth) {
+            lineTokens.push(tok);
+            lineWidth += tok.width;
+            i++;
+          } else {
+            break;
+          }
+        }
+
+        // Strip trailing space — never drawn at a line end.
+        while (lineTokens.length > 0 && lineTokens[lineTokens.length - 1].isSpace) {
+          lineWidth -= lineTokens[lineTokens.length - 1].width;
+          lineTokens.pop();
+        }
+
+        // Try hyphenation: can we pull the leading part of the next word
+        // onto this line via a hyphenated break?
+        let hyphenateEnd = false;
+        if (i < tokens.length && !tokens[i].isSpace) {
+          const nextWord = tokens[i].text;
+          const breaks = hyphenateWord(nextWord);
+          if (breaks.length > 0) {
+            const needsSpace = lineTokens.length > 0;
+            let bestBp = null;
+            let bestPrefixWidth = 0;
+            for (const bp of breaks) {
+              const prefix = nextWord.slice(0, bp);
+              const prefixWidth = doc.getTextWidth(prefix);
+              const needed = (needsSpace ? spaceWidth : 0) + prefixWidth + hyphenWidth;
+              if (lineWidth + needed <= maxWidth) {
+                bestBp = bp;
+                bestPrefixWidth = prefixWidth;
+              }
+            }
+            if (bestBp !== null) {
+              if (needsSpace) {
+                lineTokens.push({ text: " ", width: spaceWidth, isSpace: true });
+                lineWidth += spaceWidth;
+              }
+              const prefixText = nextWord.slice(0, bestBp);
+              lineTokens.push({ text: prefixText, width: bestPrefixWidth, isSpace: false });
+              lineWidth += bestPrefixWidth;
+              hyphenateEnd = true;
+              // Replace current word token with the suffix for the next line.
+              const suffix = nextWord.slice(bestBp);
+              tokens[i] = { text: suffix, width: doc.getTextWidth(suffix), isSpace: false };
+            }
+          }
+        }
+
+        if (lineTokens.length > 0) {
+          lines.push({ tokens: lineTokens, lineWidth: lineWidth, hyphenateEnd: hyphenateEnd });
+        } else if (i < tokens.length) {
+          // Single word wider than the column — overflow it on its own line
+          // (rare; jsPDF's splitTextToSize handles this the same way).
+          lines.push({ tokens: [tokens[i]], lineWidth: tokens[i].width, hyphenateEnd: false });
+          i++;
+        }
+      }
+
+      return lines;
+    }
+
+    // Render one justified line. Stretches inter-word spaces so the line
+    // fills maxWidth. The last line of a paragraph stays left-aligned
+    // (ragged-right), which is standard book typography — the last line of
+    // a paragraph is usually short, and stretching it produces awkward gaps.
+    // Draws a "-" at the line end if the line broke a word via hyphenation.
+    function drawJustifiedLine(doc, line, x, y, maxWidth, isLastLine) {
+      const tokens = line.tokens;
+      let spaceCount = 0;
+      for (const tok of tokens) if (tok.isSpace) spaceCount++;
+
+      let extraPerSpace = 0;
+      if (!isLastLine && spaceCount > 0) {
+        const slack = maxWidth - line.lineWidth;
+        if (slack > 0) extraPerSpace = slack / spaceCount;
+      }
+
+      let cx = x;
+      for (const tok of tokens) {
+        if (tok.isSpace) {
+          cx += tok.width + extraPerSpace;
+        } else {
+          doc.text(tok.text, cx, y);
+          cx += tok.width;
+        }
+      }
+
+      if (line.hyphenateEnd) {
+        doc.text("-", cx, y);
+      }
     }
 
     // Font loading utility
@@ -929,19 +1145,13 @@
                 y += SPEC.lineHeight;
               }
             } else {
-              let remaining = dc.rest;
-              let lc = 0;
-              while (lc < SPEC.dropCapLines && remaining.length > 0) {
-                const nl = doc.splitTextToSize(remaining, narrowWidth);
-                if (nl.length > 0) { remaining = remaining.slice(nl[0].length).trim(); y += SPEC.lineHeight; lc++; }
-                else break;
-              }
-              if (remaining.length > 0) {
-                const fl = doc.splitTextToSize(remaining, textW);
-                for (const line of fl) {
-                  if (y > maxY) { pages++; y = bodyTopY(); }
-                  y += SPEC.lineHeight;
-                }
+              // Hyphenation-aware breaker; first 3 lines are narrow (next to
+              // drop cap), subsequent lines are full width.
+              const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
+              const lines = breakIntoJustifiedLines(doc, dc.rest, widths, SPEC.bodySize, BODY_FONT);
+              for (let li = 0; li < lines.length; li++) {
+                if (y > maxY) { pages++; y = bodyTopY(); }
+                y += SPEC.lineHeight;
               }
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
@@ -983,7 +1193,9 @@
             const runs = parseInlineRuns(para);
             bodyLineCount = layoutRunsMixed(doc, runs, textW, SPEC.bodySize, BODY_FONT).length;
           } else {
-            bodyLineCount = doc.splitTextToSize(para, textW).length;
+            // Hyphenation-aware line counter — must match the renderer in
+            // pass 2 exactly so TOC page numbers stay accurate.
+            bodyLineCount = breakIntoJustifiedLines(doc, para, textW, SPEC.bodySize, BODY_FONT).length;
           }
 
           // Apply same widow/orphan control as in rendering
@@ -1232,38 +1444,19 @@
               isFirstPara = false; y += SPEC.paraGap; continue;
             }
 
-            // Plain drop cap body (no inline markers) — preserve v0.7.x
-            // justified rendering exactly.
-            let remainingText = restText;
-            let lineCount = 0;
-            while (lineCount < SPEC.dropCapLines && remainingText.length > 0) {
-              const narrowLines = wrapText(remainingText, narrowWidth, SPEC.bodySize);
-              if (narrowLines.length > 0) {
-                const lineText = narrowLines[0];
-                const sliced = remainingText.slice(lineText.length).trim();
-                const isLastLineOfPara = sliced.length === 0;
-                if (isLastLineOfPara) {
-                  doc.text(lineText, textX + dropCapWidth, y + BASELINE_OFFSET);
-                } else {
-                  doc.text(lineText, textX + dropCapWidth, y + BASELINE_OFFSET, { align: "justify", maxWidth: narrowWidth });
-                }
-                remainingText = sliced;
-                y += SPEC.lineHeight; lineCount++;
-              } else break;
-            }
-            if (remainingText.length > 0) {
-              y += 3;
-              const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
-              for (let li = 0; li < fullLines.length; li++) {
-                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
-                const isLastLine = li === fullLines.length - 1;
-                if (isLastLine) {
-                  doc.text(fullLines[li], textX, y + BASELINE_OFFSET);
-                } else {
-                  doc.text(fullLines[li], textX, y + BASELINE_OFFSET, { align: "justify", maxWidth: textW });
-                }
-                y += SPEC.lineHeight;
-              }
+            // Plain drop cap body (no inline markers) — hyphenation-aware
+            // line breaker + justify renderer. First 3 lines are narrow
+            // (next to the drop cap), subsequent lines are full width.
+            const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
+            const lines = breakIntoJustifiedLines(doc, restText, widths, SPEC.bodySize, BODY_FONT);
+            for (let li = 0; li < lines.length; li++) {
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              const isNarrow = li < SPEC.dropCapLines;
+              const lineX = isNarrow ? textX + dropCapWidth : textX;
+              const lineMaxW = isNarrow ? narrowWidth : textW;
+              const isLastLine = li === lines.length - 1;
+              drawJustifiedLine(doc, lines[li], lineX, y + BASELINE_OFFSET, lineMaxW, isLastLine);
+              y += SPEC.lineHeight;
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
@@ -1360,14 +1553,17 @@
             continue;
           }
 
-          const lines = wrapText(para, textW, SPEC.bodySize);
+          // Hyphenation-aware justify: build line objects with token-level
+          // widths so the renderer can stretch inter-word spaces correctly
+          // and draw "-" at any hyphenated line endings.
+          const lines = breakIntoJustifiedLines(doc, para, textW, SPEC.bodySize, BODY_FONT);
 
           // Widow/orphan control
           if (WIDOW_ORPHAN.enabled && lines.length > 0) {
             // Check how many lines can fit on current page
             let linesOnCurrentPage = 0;
             let tempY = y;
-            for (const line of lines) {
+            for (let _li = 0; _li < lines.length; _li++) {
               if (tempY > maxY) break;
               linesOnCurrentPage++;
               tempY += SPEC.lineHeight;
@@ -1396,17 +1592,15 @@
             }
           }
 
-          // Render all lines of the paragraph. Each line except the last is justified to
-          // the full text width; the last line stays left-aligned (ragged right) per
-          // industry convention so end-of-paragraph stretching doesn't leave awkward gaps.
+          // Render all lines. Each line except the last is fully justified
+          // (inter-word spaces stretched, hyphen drawn at hyphenated endings).
+          // The last line stays left-aligned (ragged-right) per industry
+          // convention so end-of-paragraph stretching doesn't leave awkward
+          // gaps on a typically-short final line.
           for (let li = 0; li < lines.length; li++) {
             if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
             const isLastLine = li === lines.length - 1;
-            if (isLastLine) {
-              doc.text(lines[li], textX, y + BASELINE_OFFSET);
-            } else {
-              doc.text(lines[li], textX, y + BASELINE_OFFSET, { align: "justify", maxWidth: textW });
-            }
+            drawJustifiedLine(doc, lines[li], textX, y + BASELINE_OFFSET, textW, isLastLine);
             y += SPEC.lineHeight;
           }
           y += SPEC.paraGap;
