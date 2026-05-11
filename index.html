@@ -108,9 +108,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.1",
+      version: "0.9.2",
       date: "2026-05-11",
       changes: [
+        "0.9.2 - Fix empty main content area on page load. The v0.7.9 autosave persisted the current 'step' value to localStorage, but a user who last left the app on Step 4 (Download) would reload to a blank card: the Step 4 render is gated by 'step === 4 && (pdfUrl || epubUrl)', and pdfUrl / epubUrl are blob URLs that only live for the current session — they aren't (and shouldn't be) persisted. On reload, step was 4 but the URLs were gone, so nothing rendered. Fixed by clamping the restored step from 4 to 3 (Preview) so the user lands somewhere actionable and can regenerate.",
         "0.9.1 - Drop cap typography fixes. Two long-standing bugs corrected. (1) Vertical sizing: getDropCapSize() previously computed capHeight = N * lineHeight, which put the cap's baseline one inter-line gap BELOW line N's baseline. The result was that line N+1 of the body text touched (or overlapped) the bottom of the drop cap. Fixed to capHeight = (N-1) * lineHeight + bodyCapHeight, the InDesign 'Drop Cap Number of Lines = N' convention used by every well-typeset trade book. Drop cap is now ~52pt (was ~62pt) for the default preset; cap-top aligns with line 1's cap-top, baseline aligns with line N's baseline, and line N+1 below has normal line-height clearance. (2) Per-letter tuck-in: all DROP_CAP_TUCK values reset to 0. The old tuck values (L=0.45, T=0.25, F=0.22, etc.) tried to pull body text into the letter's empty space on the right, but failed for letters whose shape changes vertically — e.g. an L has a vertical stroke at the top (open right) but a full-width foot at the bottom, so lines 2-3 of body text alongside the foot overlapped the ink. Pro typography just clears the letter's bounding box uniformly and adds a small padding gap (we use 5pt). The table is kept structurally for possible future per-line tuck logic but is a no-op for now.",
         "0.9.0 - Body text now justifies with hyphenation, the way trade-book typography works. Replaces jsPDF's align:'justify' (which stretches spaces only and produces word-space rivers in narrow columns) with three new helpers: hyphenateWord() does rule-based English hyphenation (prefixes, suffixes, V|CV and VC|CV consonant clusters — approximates Knuth-Liang at ~75% accuracy, no external pattern data); breakIntoJustifiedLines() runs a greedy line-breaker that hyphenates the next word into the current line when there is room for a hyphenated prefix; drawJustifiedLine() stretches inter-word spaces and draws a '-' at hyphenated line endings. The last line of each paragraph stays ragged-right (industry standard). Applied to plain body paragraphs and to the drop-cap paragraph's narrow-then-full line block. Formatted paragraphs (containing **bold** / *italic* / __underline__ markers) stay ragged-right via the existing drawRunLine path — extending hyphenation to those is future work.",
         "0.8.1 - Fix Step 3 textarea jumping back to the top whenever a B / I / U / H2 / H3 button is clicked. Two changes: (1) onMouseDown={preventDefault} on every toolbar button keeps focus on the textarea instead of briefly handing it to the button (which caused some browsers to reset scrollTop on the textarea when it regained focus). (2) The textarea's scrollTop is captured before onChange and restored inside the requestAnimationFrame callback after React commits the new value, as a belt-and-braces safeguard in case the browser still resets it. Also added focus({preventScroll:true}) for good measure. No render change.",
@@ -2108,7 +2109,16 @@
         } catch (e) { return null; }
       }, []);
 
-      const [step, setStep] = useState(initialSaved && typeof initialSaved.step === "number" ? initialSaved.step : 0);
+      // Restore the previous step from autosave, but clamp Step 4 (Download)
+      // back to Step 3 (Preview). pdfUrl / epubUrl are blob URLs that only
+      // exist for the current session — they aren't persisted to localStorage
+      // — so if a user reloads while on the Download step they would see a
+      // page rendered against step=4 with no PDF/EPUB to show, which presents
+      // as an empty card. Sending them to Preview lets them regenerate.
+      const [step, setStep] = useState(function() {
+        const s = initialSaved && typeof initialSaved.step === "number" ? initialSaved.step : 0;
+        return s >= 4 ? 3 : s;
+      });
       const [generating, setGenerating] = useState(false);
       const [progress, setProgress] = useState("");
       const [error, setError] = useState("");
