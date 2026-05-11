@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.3",
+      version: "0.7.4",
       date: "2026-05-11",
       changes: [
+        "0.7.4 - Reader Bonus page: tightened vertical gaps between blocks. Title-to-body 30pt to 16pt, body-to-URL 40pt to 24pt, header-to-title 30pt to 24pt. Block still self-sizes around any title/body length and centers vertically on the page.",
         "0.7.3 - Reader Bonus page: reduced headline from 28pt to 22pt and body from 14pt to 12pt so typical CTA titles like 'Join The 48-Hour Tinybook Challenge' fit on two balanced lines instead of one word per line.",
         "0.7.2 - Reader Bonus page: title and body now wrap at the full text-block width to match the black bars above and below. Previously the title was inset 20pt per side and the body 30pt per side, which left visible padding gaps and forced short titles to wrap one word per line.",
         "0.7.1 - Two fixes: (1) CTA page alignment - previously the title text centered on the absolute page midline while the black bars centered on the text-block midline, causing a ~12pt leftward offset of the title relative to the bars. All centered text (CTA, title page, copyright, dedication, TOC, chapter titles, epigraphs) now centers on the text block, which also corrects the same subtle offset everywhere else. CTA page content now also vertically centers on the page with a 60/40 upper bias so it reads balanced rather than top-heavy. (2) EPUB chapter break - 'Chapter 1' was landing alone on one page with its title on the next because both p.chapter-num and h1 had page-break-before. Fixed by moving the page break to whichever element opens the chapter (chapter-num when numbered, h1.chapter-opener when unnumbered) and adding page-break-after:avoid so the title stays with the number.",
@@ -581,9 +582,9 @@
         const BODY_SIZE = 12;
         const BODY_LINE_H = 16;
         const URL_BAR_H = 40;
-        const GAP_HEADER_TO_TITLE = 30;
-        const GAP_TITLE_TO_BODY = 30;
-        const GAP_BODY_TO_URL = 40;
+        const GAP_HEADER_TO_TITLE = 24;
+        const GAP_TITLE_TO_BODY = 16;
+        const GAP_BODY_TO_URL = 24;
 
         // Measure title lines (full text-block width to match the bars above/below)
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
