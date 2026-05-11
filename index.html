@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.7.7",
+      version: "0.7.8",
       date: "2026-05-11",
       changes: [
+        "0.7.8 - Internal cleanup, no visible change. Removed two drift risks surfaced by the post-recto-fix audit: (1) Pass 1 and pass 2 both reset the y cursor after a page break to 'top margin + 30', but expressed it two different ways - pass 1 read SPEC.margins.recto.top directly, pass 2 read getMargins().top. Equal today, drift risk if margins ever go asymmetric. Both now call a single helper bodyTopY(). (2) calcOpeningHeight() hardcoded 252 and 192 for title and epigraph wrap widths. Now derives them from SPEC the same way pass 2 does.",
         "0.7.7 - Two fixes: (1) Reader Bonus page: headline padding now equal above and below (16pt each side) so the title sits visually balanced. (2) Chapter recto bug: pass 2 page-advance was 'if (!isRecto()) newPage(); newPage();' which always landed the chapter on a verso. Pass 1 (TOC page numbering) already assumed recto starts, so the rendered chapter and the TOC page number disagreed. Fixed by swapping the order: newPage() first to leave the previous content, then advance once more if needed to reach recto. Same fix applied to back-of-book CTA.",
         "0.7.6 - Reader Bonus page: rewrote vertical layout using visual edges instead of baselines. Old code added GAP_HEADER_TO_TITLE then drew the title at that y as its baseline, so the cap-height pushed up into the gap and only ~8pt of visible space remained. Likewise GAP_TITLE_TO_BODY measured baseline-to-baseline plus a full TITLE_LINE_H of advance, producing ~35pt visible gap. New code positions text by cap-top from the preceding visible edge, so the gap values match what you see. Set to 18pt above the title, 14pt between title and body, 20pt above the URL bar.",
         "0.7.5 - Reader Bonus page: text inside the black bars (READER BONUS header and URL footer) now vertically centers on cap-height. Previously a hardcoded y+27 baseline left text sitting low in the bar, and the offset got worse when the URL font auto-shrank for long URLs. New formula scales with font size.",
@@ -438,7 +439,13 @@
       // on bound books the text block is offset toward the outside edge because the
       // spine-side gutter is larger, so centering on pageW/2 pushes text toward the spine.
       function getCenterX() { const m = getMargins(); return m.inside + (SPEC.pageW - m.inside - m.outside) / 2; }
-      
+
+      // Single source of truth for "where the body text starts after a page break".
+      // Used by both pass 1 (dry-run page counting) and pass 2 (actual render) so
+      // they cannot drift apart. Margins are mirrored (recto.top === verso.top),
+      // so reading recto here is equivalent to reading either page's top margin.
+      function bodyTopY() { return SPEC.margins.recto.top + 30; }
+
       // Helper function to reset font properties after page breaks
       function resetBodyFont() {
         doc.setFont(BODY_FONT, "normal");
@@ -767,7 +774,7 @@
             if (remaining.length > 0) {
               const fl = doc.splitTextToSize(remaining, textW);
               for (const line of fl) {
-                if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
+                if (y > maxY) { pages++; y = bodyTopY(); }
                 y += SPEC.lineHeight;
               }
             }
@@ -784,7 +791,7 @@
             const subLines = doc.splitTextToSize(subText, textW);
             const needed = subLines.length * subLineHeight + (SPEC.lineHeight * 2);
             if (y + needed > maxY) {
-              pages++; y = SPEC.margins.recto.top + 30;
+              pages++; y = bodyTopY();
             }
             for (const _s of subLines) { y += subLineHeight; }
             y += 4;
@@ -810,13 +817,13 @@
             if ((remainingLines > 0 && remainingLines <= WIDOW_ORPHAN.minLinesAtPageStart) ||
                 (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0)) {
               if (linesOnCurrentPage > 0) {
-                pages++; y = SPEC.margins.recto.top + 30;
+                pages++; y = bodyTopY();
               }
             }
           }
           
           for (const line of lines) {
-            if (y > maxY) { pages++; y = SPEC.margins.recto.top + 30; }
+            if (y > maxY) { pages++; y = bodyTopY(); }
             y += SPEC.lineHeight;
           }
           y += SPEC.paraGap;
@@ -824,17 +831,20 @@
         return pages;
       }
 
-      // Calculate chapter opening Y position
+      // Calculate chapter opening Y position. textW and the epigraph wrap width
+      // (textW - 60) are derived from SPEC the same way pass 2 derives them via
+      // getTextWidth(), so they cannot drift apart if margins ever change.
       function calcOpeningHeight(ch) {
+        const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside;
         let y = 55;
         if (ch.num) y += 45;
         // Title - use same smart wrapping as actual rendering
-        const titleWrapped = wrapTitle(ch.title, 252, SPEC.chapterTitleSize);
+        const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
         y += titleWrapped.length * 28 + 35;
         // Epigraph
         if (ch.epigraph) {
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
-          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", 192);
+          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW - 60);
           y += epLines.length * 20;
           if (ch.epigraphAttribution) y += 20;
           y += 30;
@@ -1046,7 +1056,7 @@
               y += 3;
               const fullLines = wrapText(remainingText, textW, SPEC.bodySize);
               for (let li = 0; li < fullLines.length; li++) {
-                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; resetBodyFont(); }
+                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
                 const isLastLine = li === fullLines.length - 1;
                 if (isLastLine) {
                   doc.text(fullLines[li], textX, y + BASELINE_OFFSET);
@@ -1074,7 +1084,7 @@
             if (y + needed > maxY) {
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
-              y = getMargins().top + 30; resetBodyFont();
+              y = bodyTopY(); resetBodyFont();
               doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
             }
             for (const sline of subLines) {
@@ -1108,7 +1118,7 @@
               if (linesOnCurrentPage > 0) {
                 newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
                 addPageNumber(bookPageNum + pagesUsed); 
-                y = getMargins().top + 30;
+                y = bodyTopY();
                 resetBodyFont();
               }
             }
@@ -1118,7 +1128,7 @@
               // Force page break to avoid orphaning just 1-2 lines
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); 
               addPageNumber(bookPageNum + pagesUsed); 
-              y = getMargins().top + 30;
+              y = bodyTopY();
               resetBodyFont();
             }
           }
@@ -1127,7 +1137,7 @@
           // the full text width; the last line stays left-aligned (ragged right) per
           // industry convention so end-of-paragraph stretching doesn't leave awkward gaps.
           for (let li = 0; li < lines.length; li++) {
-            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = getMargins().top + 30; resetBodyFont(); }
+            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
             const isLastLine = li === lines.length - 1;
             if (isLastLine) {
               doc.text(lines[li], textX, y + BASELINE_OFFSET);
