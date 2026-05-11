@@ -79,15 +79,25 @@
     // Default spec for initial UI rendering
     let SPEC = createSpec('default');
 
-    // Drop cap font size is computed so that its cap-height spans exactly dropCapLines
-    // of body text at the current line height. This matches how InDesign's "span N lines"
-    // drop cap feature works.
-    //   cap-height wanted = dropCapLines * lineHeight
-    //   font size needed  = cap-height wanted / capHeightRatio
-    // For 10pt body / 15pt leading / 3 lines / 0.72 ratio ≈ 62.5pt font size
-    // For 11pt body / 16.5pt leading / 3 lines / 0.72 ratio ≈ 68.75pt font size
+    // Drop cap font size is computed so that:
+    //   - cap-top aligns with line 1's cap-top
+    //   - cap-bottom (baseline) aligns with line N's baseline
+    // This is the InDesign "Drop Cap Number of Lines = N" convention and what
+    // every well-typeset trade book uses. The visible cap spans:
+    //   capHeight = (N-1) * lineHeight + bodyCapHeight
+    // (N-1 baseline-to-baseline gaps inside the block, plus one body cap-height
+    // at the top to extend up to line 1's cap-top).
+    //
+    // Earlier versions used (N * lineHeight) which made the cap one inter-line
+    // gap too tall — its baseline ended up below line N's baseline and crowded
+    // line N+1 of the body text.
+    //
+    // For 10pt body / 15pt leading / 3 lines / 0.72 ratio ≈ 51.7pt font size
+    // For 11pt body / 16.5pt leading / 3 lines / 0.72 ratio ≈ 56.8pt font size
     function getDropCapSize() {
-      return (SPEC.dropCapLines * SPEC.lineHeight) / SPEC.capHeightRatio;
+      const bodyCapH = SPEC.bodySize * SPEC.capHeightRatio;
+      const capHeight = (SPEC.dropCapLines - 1) * SPEC.lineHeight + bodyCapH;
+      return capHeight / SPEC.capHeightRatio;
     }
 
     // Widow/orphan control settings
@@ -98,9 +108,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.0",
+      version: "0.9.1",
       date: "2026-05-11",
       changes: [
+        "0.9.1 - Drop cap typography fixes. Two long-standing bugs corrected. (1) Vertical sizing: getDropCapSize() previously computed capHeight = N * lineHeight, which put the cap's baseline one inter-line gap BELOW line N's baseline. The result was that line N+1 of the body text touched (or overlapped) the bottom of the drop cap. Fixed to capHeight = (N-1) * lineHeight + bodyCapHeight, the InDesign 'Drop Cap Number of Lines = N' convention used by every well-typeset trade book. Drop cap is now ~52pt (was ~62pt) for the default preset; cap-top aligns with line 1's cap-top, baseline aligns with line N's baseline, and line N+1 below has normal line-height clearance. (2) Per-letter tuck-in: all DROP_CAP_TUCK values reset to 0. The old tuck values (L=0.45, T=0.25, F=0.22, etc.) tried to pull body text into the letter's empty space on the right, but failed for letters whose shape changes vertically — e.g. an L has a vertical stroke at the top (open right) but a full-width foot at the bottom, so lines 2-3 of body text alongside the foot overlapped the ink. Pro typography just clears the letter's bounding box uniformly and adds a small padding gap (we use 5pt). The table is kept structurally for possible future per-line tuck logic but is a no-op for now.",
         "0.9.0 - Body text now justifies with hyphenation, the way trade-book typography works. Replaces jsPDF's align:'justify' (which stretches spaces only and produces word-space rivers in narrow columns) with three new helpers: hyphenateWord() does rule-based English hyphenation (prefixes, suffixes, V|CV and VC|CV consonant clusters — approximates Knuth-Liang at ~75% accuracy, no external pattern data); breakIntoJustifiedLines() runs a greedy line-breaker that hyphenates the next word into the current line when there is room for a hyphenated prefix; drawJustifiedLine() stretches inter-word spaces and draws a '-' at hyphenated line endings. The last line of each paragraph stays ragged-right (industry standard). Applied to plain body paragraphs and to the drop-cap paragraph's narrow-then-full line block. Formatted paragraphs (containing **bold** / *italic* / __underline__ markers) stay ragged-right via the existing drawRunLine path — extending hyphenation to those is future work.",
         "0.8.1 - Fix Step 3 textarea jumping back to the top whenever a B / I / U / H2 / H3 button is clicked. Two changes: (1) onMouseDown={preventDefault} on every toolbar button keeps focus on the textarea instead of briefly handing it to the button (which caused some browsers to reset scrollTop on the textarea when it regained focus). (2) The textarea's scrollTop is captured before onChange and restored inside the requestAnimationFrame callback after React commits the new value, as a belt-and-braces safeguard in case the browser still resets it. Also added focus({preventScroll:true}) for good measure. No render change.",
         "0.8.0 - Inline formatting toolbar in Step 3. Each chapter's body editor now has a B / I / U + H2 / H3 strip above the textarea that wraps the current selection (B/I/U) or toggles a line prefix (H2/H3) in markdown-lite syntax: **bold**, *italic*, __underline__, ## Heading, ### Subhead. The PDF renderer honors all five through new helpers (parseInlineRuns, layoutRunsMixed, drawRunLine, classifyParagraph). The render path is gated by containsFormatting(): paragraphs without markers keep the v0.7.9 justified rendering, so unformatted chapters look identical to before. Paragraphs with markers use the run-based ragged-right path (drawRunLine doesn't justify). H3 now actually renders in the PDF (the '### ' prefix was preserved through docx import in v0.7.9 but not drawn). H2 unchanged — same smart break that reserves 2 body lines beneath it. Drop cap on the first body paragraph still works alongside inline formatting. Pass 1 (TOC page-number dry run) updated in lockstep so TOC numbers stay accurate.",
@@ -237,16 +248,21 @@
     }
 
     // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
-    // width. Narrow/asymmetric capitals (L, T, I, F, J, P, Y) have significant empty
-    // space on their right side that body text can tuck into without touching the glyph.
-    // Full-width capitals (M, W, O, etc.) have no tuckable negative space.
-    // Values are tuned for Gelasio bold at display size and scale proportionally with it.
+    // width. ALL VALUES ARE ZERO. The previous tuck table tried to pull body text into
+    // letters with empty space on the right (L, T, F, P, Y, etc.) but this caused
+    // visible overlap on lines 2-3 where those letters' shape changes — e.g. an L's
+    // foot is full-width at the bottom, so body text alongside the foot overlapped
+    // the ink. Professional trade-book typography just clears the letter's full
+    // bounding box and adds a uniform padding gap, which is what we do now via the
+    // fixed +5pt padding in the chapter render path. The table is kept as a no-op
+    // so the dropCapTuckedWidth() helper still exists in case we want to add a
+    // future per-line tuck (different tuck values per line position).
     const DROP_CAP_TUCK = {
-      A: 0.05, B: 0.00, C: 0.00, D: 0.00, E: 0.00,
-      F: 0.22, G: 0.00, H: 0.00, I: 0.00, J: 0.15,
-      K: 0.05, L: 0.45, M: 0.00, N: 0.00, O: 0.00,
-      P: 0.20, Q: 0.00, R: 0.00, S: 0.00, T: 0.25,
-      U: 0.00, V: 0.05, W: 0.00, X: 0.05, Y: 0.15,
+      A: 0.00, B: 0.00, C: 0.00, D: 0.00, E: 0.00,
+      F: 0.00, G: 0.00, H: 0.00, I: 0.00, J: 0.00,
+      K: 0.00, L: 0.00, M: 0.00, N: 0.00, O: 0.00,
+      P: 0.00, Q: 0.00, R: 0.00, S: 0.00, T: 0.00,
+      U: 0.00, V: 0.00, W: 0.00, X: 0.00, Y: 0.00,
       Z: 0.00,
     };
 
