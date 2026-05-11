@@ -131,9 +131,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.9.3",
+      version: "0.9.4",
       date: "2026-05-11",
       changes: [
+        "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
         "0.9.3 - Upgrade hyphenation to true Knuth-Liang via the Hypher library + the en-us pattern file. Both ship CommonJS, so they're loaded in <head> with a small module.exports shim that exposes Hypher and the patterns as window.__tbf_Hypher / window.__tbf_HyphenPatterns. hyphenateWord() now picks the Knuth-Liang result when Hypher is available and falls back to the v0.9.0 rule-based hyphenator if either script fails to load (offline, blocked, etc.) so there is no failure mode. Visible improvements over rule-based: 'something' breaks as some-thing (was so-mething), 'running' as run-ning (was runn-ing), 'started' stays whole because no clean 2/3 split exists (was star-ted), 'philosophy' offers phi-los-o-phy (was phi-losophy / philo-sophy), 'recognition' as recog-ni-tion (was four sub-optimal splits). Total CDN payload: ~7 KB hypher + ~27 KB patterns, served from jsDelivr.",
         "0.9.2 - Fix empty main content area on page load. The v0.7.9 autosave persisted the current 'step' value to localStorage, but a user who last left the app on Step 4 (Download) would reload to a blank card: the Step 4 render is gated by 'step === 4 && (pdfUrl || epubUrl)', and pdfUrl / epubUrl are blob URLs that only live for the current session — they aren't (and shouldn't be) persisted. On reload, step was 4 but the URLs were gone, so nothing rendered. Fixed by clamping the restored step from 4 to 3 (Preview) so the user lands somewhere actionable and can regenerate.",
         "0.9.1 - Drop cap typography fixes. Two long-standing bugs corrected. (1) Vertical sizing: getDropCapSize() previously computed capHeight = N * lineHeight, which put the cap's baseline one inter-line gap BELOW line N's baseline. The result was that line N+1 of the body text touched (or overlapped) the bottom of the drop cap. Fixed to capHeight = (N-1) * lineHeight + bodyCapHeight, the InDesign 'Drop Cap Number of Lines = N' convention used by every well-typeset trade book. Drop cap is now ~52pt (was ~62pt) for the default preset; cap-top aligns with line 1's cap-top, baseline aligns with line N's baseline, and line N+1 below has normal line-height clearance. (2) Per-letter tuck-in: all DROP_CAP_TUCK values reset to 0. The old tuck values (L=0.45, T=0.25, F=0.22, etc.) tried to pull body text into the letter's empty space on the right, but failed for letters whose shape changes vertically — e.g. an L has a vertical stroke at the top (open right) but a full-width foot at the bottom, so lines 2-3 of body text alongside the foot overlapped the ink. Pro typography just clears the letter's bounding box uniformly and adds a small padding gap (we use 5pt). The table is kept structurally for possible future per-line tuck logic but is a no-op for now.",
@@ -270,6 +271,49 @@
         return out;
       }
       return obj;
+    }
+
+    // Normalize line endings from arbitrary sources to the textarea-friendly
+    // form (\n for line break, \n\n for paragraph break). Different source
+    // applications encode breaks differently and we want consistent state.
+    //   \r\n     -> \n      (Windows / Word for Windows)
+    //   \r       -> \n      (legacy classic Mac)
+    //       -> \n      (Unicode line separator — some rich text editors)
+    //       -> \n\n    (Unicode paragraph separator — Word, Google Docs)
+    function normalizeLineEndings(text) {
+      return String(text == null ? "" : text)
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/ /g, "\n")
+        .replace(/ /g, "\n\n");
+    }
+
+    // Defensive paste handler. Some clipboard sources put line breaks on the
+    // clipboard as something other than \n: \r\n from Word,  /
+    // from Google Docs, etc. Browsers usually normalize these into a textarea
+    // but not always (varies by browser version, by whether the source put
+    // plain text or HTML on the clipboard, etc.). We intercept the paste,
+    // read the plain-text payload, normalize all break encodings to \n / \n\n,
+    // and insert at the current cursor position. We trigger a real input event
+    // afterwards so React's onChange fires and state updates correctly.
+    function normalizePasteIntoTextarea(e) {
+      if (!e || !e.clipboardData) return; // let the default handler run
+      const raw = e.clipboardData.getData("text/plain") || e.clipboardData.getData("text");
+      if (!raw) return;
+      const normalized = normalizeLineEndings(raw);
+      e.preventDefault();
+      const ta = e.target;
+      const start = ta.selectionStart || 0;
+      const end = ta.selectionEnd || 0;
+      const newValue = ta.value.slice(0, start) + normalized + ta.value.slice(end);
+      // Use the prototype setter so React's onChange fires.
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(ta, newValue);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      const pos = start + normalized.length;
+      requestAnimationFrame(function() {
+        try { ta.setSelectionRange(pos, pos); } catch (e) {}
+      });
     }
 
     // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
@@ -1966,7 +2010,7 @@
         <div style={{ marginBottom: 16 }}>
           {label && <label style={{ display: "block", fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 6, fontWeight: 500 }}>{label}</label>}
           {multiline ? (
-            <textarea value={value} onChange={function(e) { onChange(e.target.value); }} placeholder={placeholder} rows={rows} style={baseStyle} />
+            <textarea value={value} onChange={function(e) { onChange(e.target.value); }} onPaste={normalizePasteIntoTextarea} placeholder={placeholder} rows={rows} style={baseStyle} />
           ) : (
             <input value={value} onChange={function(e) { onChange(e.target.value); }} placeholder={placeholder} style={baseStyle} />
           )}
@@ -2052,7 +2096,7 @@
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
           </div>
-          <textarea ref={taRef} value={value} onChange={function(e) { onChange(e.target.value); }} rows={rows}
+          <textarea ref={taRef} value={value} onChange={function(e) { onChange(e.target.value); }} onPaste={normalizePasteIntoTextarea} rows={rows}
             style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
         </div>
       );
@@ -2537,7 +2581,7 @@
                   Upload .txt or .docx File
                   <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
                 </label>
-                <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }}
+                <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }} onPaste={normalizePasteIntoTextarea}
                   placeholder="Paste your manuscript here..."
                   style={{ width: "100%", height: 400, padding: 16, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, color: BRAND.textPrimary, fontSize: 13, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.6, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
