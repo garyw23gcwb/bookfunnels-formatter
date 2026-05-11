@@ -98,9 +98,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.8.0",
+      version: "0.8.1",
       date: "2026-05-11",
       changes: [
+        "0.8.1 - Fix Step 3 textarea jumping back to the top whenever a B / I / U / H2 / H3 button is clicked. Two changes: (1) onMouseDown={preventDefault} on every toolbar button keeps focus on the textarea instead of briefly handing it to the button (which caused some browsers to reset scrollTop on the textarea when it regained focus). (2) The textarea's scrollTop is captured before onChange and restored inside the requestAnimationFrame callback after React commits the new value, as a belt-and-braces safeguard in case the browser still resets it. Also added focus({preventScroll:true}) for good measure. No render change.",
         "0.8.0 - Inline formatting toolbar in Step 3. Each chapter's body editor now has a B / I / U + H2 / H3 strip above the textarea that wraps the current selection (B/I/U) or toggles a line prefix (H2/H3) in markdown-lite syntax: **bold**, *italic*, __underline__, ## Heading, ### Subhead. The PDF renderer honors all five through new helpers (parseInlineRuns, layoutRunsMixed, drawRunLine, classifyParagraph). The render path is gated by containsFormatting(): paragraphs without markers keep the v0.7.9 justified rendering, so unformatted chapters look identical to before. Paragraphs with markers use the run-based ragged-right path (drawRunLine doesn't justify). H3 now actually renders in the PDF (the '### ' prefix was preserved through docx import in v0.7.9 but not drawn). H2 unchanged — same smart break that reserves 2 body lines beneath it. Drop cap on the first body paragraph still works alongside inline formatting. Pass 1 (TOC page-number dry run) updated in lockstep so TOC numbers stay accurate.",
         "0.7.9 - Backend keepers ported from the parallel v0.8.0 work track. No visible UI change. (1) Autosave: bookData, rawText, chapters, step and textSizePreset now persist to localStorage with a 400ms debounce and hydrate on first render, so a tab refresh or crash no longer wipes in-progress work. (2) Docx import robustness: flattenDocxHtml now recurses into nested section / div / article / main containers so headings buried below the top level of mammoth's output still surface (fixes the 'one chapter missing on real manuscripts' case). H3 headings preserved with a '### ' prefix in the flattened output (rendering of that prefix comes in v0.8.0). (3) pickDropCap() helper finds the first alphabetic character in a paragraph so paragraphs that open with a smart quote, numeral, em-dash or symbol still get a clean drop cap glyph instead of garbage. Applied in both the PDF dry-run and the actual render path. (4) Iframe height reporter: emits postMessage({type:'tinybook:height', height}) to the parent window on mount and on every resize, so a hosting page can auto-size the iframe embed. (5) CDN version pins: React 18.3.1, ReactDOM 18.3.1 and Babel standalone 7.25.6 are now pinned so surprise upstream releases can't break the tool.",
         "0.7.8 - Internal cleanup, no visible change. Removed two drift risks surfaced by the post-recto-fix audit: (1) Pass 1 and pass 2 both reset the y cursor after a page break to 'top margin + 30', but expressed it two different ways - pass 1 read SPEC.margins.recto.top directly, pass 2 read getMargins().top. Equal today, drift risk if margins ever go asymmetric. Both now call a single helper bodyTopY(). (2) calcOpeningHeight() hardcoded 252 and 192 for title and epigraph wrap widths. Now derives them from SPEC the same way pass 2 does.",
@@ -1706,19 +1707,26 @@
       const wrapSelection = function(before, after) {
         const ta = taRef.current; if (!ta) return;
         const start = ta.selectionStart, end = ta.selectionEnd;
+        // Save scrollTop so we can restore it after React re-renders the
+        // textarea. Some browsers reset scrollTop when the value prop changes,
+        // which scrolls the visible content back to the top.
+        const scrollTop = ta.scrollTop;
         const selected = value.slice(start, end);
         const newValue = value.slice(0, start) + before + selected + after + value.slice(end);
         onChange(newValue);
         requestAnimationFrame(function() {
-          ta.focus();
-          if (selected.length > 0) ta.setSelectionRange(start + before.length, end + before.length);
-          else ta.setSelectionRange(start + before.length, start + before.length);
+          const t = taRef.current; if (!t) return;
+          t.focus({ preventScroll: true });
+          if (selected.length > 0) t.setSelectionRange(start + before.length, end + before.length);
+          else t.setSelectionRange(start + before.length, start + before.length);
+          t.scrollTop = scrollTop;
         });
       };
 
       const toggleLinePrefix = function(prefix) {
         const ta = taRef.current; if (!ta) return;
         const start = ta.selectionStart;
+        const scrollTop = ta.scrollTop;
         const lineStart = value.lastIndexOf("\n", start - 1) + 1;
         const lineMatch = value.slice(lineStart).match(/^(#{1,6})\s/);
         let newValue, newPos;
@@ -1734,8 +1742,20 @@
           newPos = start + prefix.length;
         }
         onChange(newValue);
-        requestAnimationFrame(function() { ta.focus(); ta.setSelectionRange(newPos, newPos); });
+        requestAnimationFrame(function() {
+          const t = taRef.current; if (!t) return;
+          t.focus({ preventScroll: true });
+          t.setSelectionRange(newPos, newPos);
+          t.scrollTop = scrollTop;
+        });
       };
+
+      // Prevent mousedown on toolbar buttons from moving focus off the textarea.
+      // Without this, clicking a button briefly defocuses the textarea, the
+      // value prop changes, then we refocus — which on some browsers loses the
+      // saved scrollTop. Suppressing the default focus shift keeps the textarea
+      // focused throughout the click and avoids the visible scroll jump.
+      const swallowFocus = function(e) { e.preventDefault(); };
 
       const btnStyle = { padding: "4px 10px", fontSize: 12, fontFamily: FONT, fontWeight: 600, background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border, borderRadius: 6, cursor: "pointer", minWidth: 28, lineHeight: 1.2 };
       const divider = { width: 1, alignSelf: "stretch", background: BRAND.border, margin: "0 4px" };
@@ -1744,12 +1764,12 @@
         <div style={{ marginBottom: 16 }}>
           {label && <label style={{ display: "block", fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 6, fontWeight: 500 }}>{label}</label>}
           <div style={{ display: "flex", alignItems: "center", gap: 4, padding: 6, background: BRAND.bgSubtle, border: "1px solid " + BRAND.border, borderBottom: "none", borderTopLeftRadius: 8, borderTopRightRadius: 8 }}>
-            <button type="button" title="Bold (wraps selection in **)" onClick={function() { wrapSelection("**", "**"); }} style={Object.assign({}, btnStyle, { fontWeight: 800 })}>B</button>
-            <button type="button" title="Italic (wraps selection in *)" onClick={function() { wrapSelection("*", "*"); }} style={Object.assign({}, btnStyle, { fontStyle: "italic" })}>I</button>
-            <button type="button" title="Underline (wraps selection in __)" onClick={function() { wrapSelection("__", "__"); }} style={Object.assign({}, btnStyle, { textDecoration: "underline" })}>U</button>
+            <button type="button" title="Bold (wraps selection in **)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("**", "**"); }} style={Object.assign({}, btnStyle, { fontWeight: 800 })}>B</button>
+            <button type="button" title="Italic (wraps selection in *)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("*", "*"); }} style={Object.assign({}, btnStyle, { fontStyle: "italic" })}>I</button>
+            <button type="button" title="Underline (wraps selection in __)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("__", "__"); }} style={Object.assign({}, btnStyle, { textDecoration: "underline" })}>U</button>
             <div style={divider} />
-            <button type="button" title="Heading (adds ## to current line)" onClick={function() { toggleLinePrefix("## "); }} style={btnStyle}>H2</button>
-            <button type="button" title="Subheading (adds ### to current line)" onClick={function() { toggleLinePrefix("### "); }} style={btnStyle}>H3</button>
+            <button type="button" title="Heading (adds ## to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("## "); }} style={btnStyle}>H2</button>
+            <button type="button" title="Subheading (adds ### to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("### "); }} style={btnStyle}>H3</button>
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
           </div>
