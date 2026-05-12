@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.7",
+      version: "0.11.8",
       date: "2026-05-12",
       changes: [
+        "0.11.8 - Undo button in the chapter body editor. The toolbar in Step 3 now has an Undo (↶) button at the leftmost position; Cmd+Z (Mac) / Ctrl+Z (Win/Linux) also triggers undo. Each RichTextInput keeps its own undo stack (capped at 100 entries) — snapshots are pushed before any toolbar action (B/I/U, H2/H3, image insert, table insert) and at the start of each typing burst (with a 700ms idle commit). Switching chapters mounts a fresh editor with an empty stack so there's no cross-chapter bleed. The button auto-disables when there's nothing to undo. Replaces the browser's native undo, which was unreliable because the textarea is React-controlled (programmatic edits bypassed the browser's stack and some browsers cleared it whenever the value prop changed).",
         "0.11.7 - Three fixes. (1) Scene-break ornament now stays visually centered on every page, not just the first page of a chapter. Root cause: the chapter render loop captured textX once at chapter open (recto position, x=66) and reused it on every subsequent page — so when body wrapped to a verso the text block stayed at the recto x while getCenterX() correctly shifted to the verso center, making the centered \"* * *\" appear off-center relative to the body text around it. Fix: textX and textW are now `let` and re-captured after every newPage() call inside the chapter loop, so the mirrored verso/recto margins are honoured on every page. (2) The Step 1 body-text-size description now reads \"Choose between default and spacious settings\" — removed the project-specific reference. (3) Reaffirms v0.11.6: TOC entry font already follows the body-size preset selector (10pt default / 11pt spacious), via tocEntrySize = SPEC.bodySize.",
         "0.11.6 - Scene-break robustness + TOC typography. (1) Scene breaks (\"* * *\", \"***\", \"---\", etc.) now get promoted to their own paragraph even when the paste only has single newlines around them — previously a paste from Word / Docs / Pages that did not preserve a full blank line between prose and the break let the asterisks fall back into the surrounding body, where the inline-run parser interpreted them as italic markers and produced a stray single star. New helper splitChapterBody() runs at the top of pass 1, pass 2, and the EPUB chapter loop; it splits on blank lines as before, then walks each chunk and promotes any line that matches isSectionBreak. Expanded the ornament regex to include the unicode asterisk variants Word / Pages / InDesign sometimes substitute (∗ ⁎ ⋆ ✱ ✦ ❋ ※ ⁂ ‧) and to accept a single ornament character alone on a line (e.g. just \"*\"). (2) TOC typography brought into line with trade-book convention used by Penguin, Random House, O'Reilly: \"Contents\" heading drops from 22pt to 18pt so it no longer competes with the 20pt chapter titles; entries drop from a hardcoded 11pt to SPEC.bodySize (so 10pt in default preset, 11pt in spacious) so the rhythm matches the body; row spacing tightens from a flat 30pt to 2x line-height. Result reads as a reference page, not a display page.",
         "0.11.5 - Scene-break ornament support. Three centered asterisks (or `***`, `---`, `# # #`, `~ ~ ~`, `• • •`) on their own line are now recognised as a trade-book scene-break marker and rendered as a centered `* * *` ornament with one line of breathing room above and below — both in the PDF and the EPUB. Previously a line like `* * *` was passed through to the inline-run parser, which interpreted the asterisks as italic markers and produced garbage. New helper `isSectionBreak(p)` runs FIRST inside classifyParagraph, before any markdown-marker detection, so the ornament is detected and rendered as a discrete `scenebreak` block in both rendering passes. Scene breaks do not consume the drop-cap-on-first-paragraph flag, so a chapter that opens with a scene break still drops the cap on the next real body paragraph. EPUB path emits `<p class=\"scene-break\">* * *</p>` with letter-spacing and vertical margin so readers across Apple Books, Kobo and Kindle display the transition consistently.",
@@ -2788,11 +2789,118 @@
       const fileInputRef = React.useRef(null);
       const [imageBusy, setImageBusy] = useState(false);
 
+      // ----- Undo support -----
+      // The textarea is React-controlled, which means the browser's native
+      // undo stack is unreliable — programmatic edits (toolbar wraps,
+      // image / table inserts) bypass it entirely, and on some browsers
+      // the stack gets cleared whenever the value prop changes. We
+      // maintain our own undo history per RichTextInput instance.
+      //
+      // Snapshots are pushed on two occasions:
+      //   1. Before any programmatic edit (toolbar button, image/table
+      //      insert) — see snapshotBeforeEdit().
+      //   2. At the start of a typing burst — the pre-burst value is
+      //      held in pendingPreBurstRef and committed to the stack when
+      //      the user pauses typing for 700ms (handleTextareaChange).
+      //
+      // Cmd+Z / Ctrl+Z and the toolbar button both invoke performUndo().
+      // ChapterCard keys each chapter by chapter.id, so switching
+      // chapters mounts a fresh RichTextInput with an empty stack —
+      // no cross-chapter bleed.
+      const undoStackRef = React.useRef([]);
+      const pendingPreBurstRef = React.useRef(null);
+      const typingTimerRef = React.useRef(null);
+      const [, setTick] = useState(0);
+      const forceTick = function() { setTick(function(n) { return (n + 1) | 0; }); };
+
+      function currentSnap() {
+        const ta = taRef.current;
+        return {
+          value: value,
+          selStart: ta ? ta.selectionStart : value.length,
+          selEnd: ta ? ta.selectionEnd : value.length,
+          scrollTop: ta ? ta.scrollTop : 0,
+        };
+      }
+
+      function pushUndo(snap) {
+        const stack = undoStackRef.current;
+        // Skip no-ops (identical to top of stack).
+        if (stack.length > 0 && stack[stack.length - 1].value === snap.value) return;
+        stack.push(snap);
+        // Cap at 100 entries so this can't grow unbounded.
+        if (stack.length > 100) stack.shift();
+      }
+
+      function flushPendingTyping() {
+        if (typingTimerRef.current) {
+          clearTimeout(typingTimerRef.current);
+          typingTimerRef.current = null;
+        }
+        if (pendingPreBurstRef.current) {
+          pushUndo(pendingPreBurstRef.current);
+          pendingPreBurstRef.current = null;
+        }
+      }
+
+      // Call this at the top of every programmatic edit (B/I/U wrap,
+      // heading prefix, image/table insert). It commits any in-flight
+      // typing burst first so the typing is its own undo step, then
+      // pushes the current value as the pre-edit state.
+      function snapshotBeforeEdit() {
+        flushPendingTyping();
+        pushUndo(currentSnap());
+        forceTick();
+      }
+
+      function performUndo() {
+        flushPendingTyping();
+        const stack = undoStackRef.current;
+        if (stack.length === 0) { forceTick(); return; }
+        const snap = stack.pop();
+        onChange(snap.value);
+        requestAnimationFrame(function() {
+          const t = taRef.current; if (!t) return;
+          t.focus({ preventScroll: true });
+          try { t.setSelectionRange(snap.selStart, snap.selEnd); } catch (e) {}
+          if (typeof snap.scrollTop === "number") t.scrollTop = snap.scrollTop;
+        });
+        forceTick();
+      }
+
+      function handleTextareaChange(e) {
+        // Start of a new typing burst: snapshot the pre-burst state so
+        // undo restores to where the burst began.
+        if (pendingPreBurstRef.current === null) {
+          pendingPreBurstRef.current = currentSnap();
+          forceTick(); // update the Undo button's disabled state
+        }
+        if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+        typingTimerRef.current = setTimeout(function() {
+          flushPendingTyping();
+          forceTick();
+        }, 700);
+        onChange(e.target.value);
+      }
+
+      function handleTextareaKeyDown(e) {
+        // Cmd+Z (Mac) / Ctrl+Z (Win/Linux). Shift+Cmd+Z (redo) intentionally
+        // not intercepted — let the browser handle redo if it can; otherwise
+        // it's a no-op. Keeping scope tight for v1.
+        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+          e.preventDefault();
+          performUndo();
+        }
+      }
+
+      const canUndo = undoStackRef.current.length > 0 || pendingPreBurstRef.current !== null;
+
       // Helper: insert arbitrary text at the textarea's current cursor
       // position, surrounded by blank lines so a paragraph-level marker
       // (like an image marker) becomes its own paragraph.
       function insertBlockAtCursor(insertText) {
         const ta = taRef.current; if (!ta) return;
+        snapshotBeforeEdit();
         const start = ta.selectionStart || 0;
         const end = ta.selectionEnd || 0;
         const before = value.slice(0, start);
@@ -2839,6 +2947,7 @@
 
       const wrapSelection = function(before, after) {
         const ta = taRef.current; if (!ta) return;
+        snapshotBeforeEdit();
         const start = ta.selectionStart, end = ta.selectionEnd;
         // Save scrollTop so we can restore it after React re-renders the
         // textarea. Some browsers reset scrollTop when the value prop changes,
@@ -2858,6 +2967,7 @@
 
       const toggleLinePrefix = function(prefix) {
         const ta = taRef.current; if (!ta) return;
+        snapshotBeforeEdit();
         const start = ta.selectionStart;
         const scrollTop = ta.scrollTop;
         const lineStart = value.lastIndexOf("\n", start - 1) + 1;
@@ -2897,6 +3007,15 @@
         <div style={{ marginBottom: 16 }}>
           {label && <label style={{ display: "block", fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 6, fontWeight: 500 }}>{label}</label>}
           <div style={{ display: "flex", alignItems: "center", gap: 4, padding: 6, background: BRAND.bgSubtle, border: "1px solid " + BRAND.border, borderBottom: "none", borderTopLeftRadius: 8, borderTopRightRadius: 8 }}>
+            <button
+              type="button"
+              title="Undo (Cmd+Z / Ctrl+Z). Reverts the last typing burst or toolbar action."
+              onMouseDown={swallowFocus}
+              onClick={performUndo}
+              disabled={!canUndo}
+              style={Object.assign({}, btnStyle, { opacity: canUndo ? 1 : 0.4, cursor: canUndo ? "pointer" : "default" })}
+            >{"↶"}</button>
+            <div style={divider} />
             <button type="button" title="Bold (wraps selection in **)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("**", "**"); }} style={Object.assign({}, btnStyle, { fontWeight: 800 })}>B</button>
             <button type="button" title="Italic (wraps selection in *)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("*", "*"); }} style={Object.assign({}, btnStyle, { fontStyle: "italic" })}>I</button>
             <button type="button" title="Underline (wraps selection in __)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("__", "__"); }} style={Object.assign({}, btnStyle, { textDecoration: "underline" })}>U</button>
@@ -2950,7 +3069,7 @@
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
           </div>
-          <textarea ref={taRef} value={value} onChange={function(e) { onChange(e.target.value); }} onPaste={normalizePasteIntoTextarea} rows={rows}
+          <textarea ref={taRef} value={value} onChange={handleTextareaChange} onKeyDown={handleTextareaKeyDown} onPaste={normalizePasteIntoTextarea} rows={rows}
             style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
         </div>
       );
