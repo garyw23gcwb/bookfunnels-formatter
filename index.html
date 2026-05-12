@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.5",
+      version: "0.11.6",
       date: "2026-05-12",
       changes: [
+        "0.11.6 - Scene-break robustness + TOC typography. (1) Scene breaks (\"* * *\", \"***\", \"---\", etc.) now get promoted to their own paragraph even when the paste only has single newlines around them — previously a paste from Word / Docs / Pages that did not preserve a full blank line between prose and the break let the asterisks fall back into the surrounding body, where the inline-run parser interpreted them as italic markers and produced a stray single star. New helper splitChapterBody() runs at the top of pass 1, pass 2, and the EPUB chapter loop; it splits on blank lines as before, then walks each chunk and promotes any line that matches isSectionBreak. Expanded the ornament regex to include the unicode asterisk variants Word / Pages / InDesign sometimes substitute (∗ ⁎ ⋆ ✱ ✦ ❋ ※ ⁂ ‧) and to accept a single ornament character alone on a line (e.g. just \"*\"). (2) TOC typography brought into line with trade-book convention used by Penguin, Random House, O'Reilly: \"Contents\" heading drops from 22pt to 18pt so it no longer competes with the 20pt chapter titles; entries drop from a hardcoded 11pt to SPEC.bodySize (so 10pt in default preset, 11pt in spacious) so the rhythm matches the body; row spacing tightens from a flat 30pt to 2x line-height. Result reads as a reference page, not a display page.",
         "0.11.5 - Scene-break ornament support. Three centered asterisks (or `***`, `---`, `# # #`, `~ ~ ~`, `• • •`) on their own line are now recognised as a trade-book scene-break marker and rendered as a centered `* * *` ornament with one line of breathing room above and below — both in the PDF and the EPUB. Previously a line like `* * *` was passed through to the inline-run parser, which interpreted the asterisks as italic markers and produced garbage. New helper `isSectionBreak(p)` runs FIRST inside classifyParagraph, before any markdown-marker detection, so the ornament is detected and rendered as a discrete `scenebreak` block in both rendering passes. Scene breaks do not consume the drop-cap-on-first-paragraph flag, so a chapter that opens with a scene break still drops the cap on the next real body paragraph. EPUB path emits `<p class=\"scene-break\">* * *</p>` with letter-spacing and vertical margin so readers across Apple Books, Kobo and Kindle display the transition consistently.",
         "0.11.4 - Multi-project support. The top-right corner now has a Project picker (📚 dropdown) listing every book you've started in this browser, with name (auto-derived from the book title), a one-line description (chapter count · word count · last edited), and a delete X per row. The bottom of the dropdown has a '+ New Project' entry to start a fresh blank slate without losing the current one — exactly like drafting a new email while keeping your other drafts. Each project has its own bookData, manuscript, chapters, step, and text-size preset, all persisted via a new localStorage key 'tinybook-formatter-projects' (one-time migration from the v0.7.9 single-project key happens silently on first load). The Clear Content button is renamed 'Clear This Project' and now only resets the active slot — it no longer deletes anything from localStorage, so other projects stay safe. Implementation: ProjectPicker is a self-contained component (outside-click closes, sorted active-first then by lastModified desc); switching / creating / deleting all snapshot the current form state into the active slot before transitioning so unsaved work isn't lost.",
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -931,16 +932,64 @@
     // markers and produce garbage. So we detect it here BEFORE classification
     // continues into the markdown-lite parser.
     //
-    // Accepts any line that is made up entirely of the ornament characters
-    // (asterisk, hash, tilde, hyphen, em/en-dash, bullet) optionally separated
-    // by whitespace, with at least 3 ornament characters total. Examples:
-    //   "* * *", "***", "---", "# # #", "~ ~ ~", "• • •".
+    // Accepts any line that is made up entirely of ornament characters
+    // optionally separated by whitespace, with at least 3 ornament characters
+    // total. Recognises:
+    //   "* * *", "***", "---", "# # #", "~ ~ ~", "• • •"
+    //   and the unicode asterisk variants that Word / InDesign / Pages
+    //   sometimes substitute: ∗ ⁎ ⋆ ✱ ✦ ❋ ※ ⁂ ‧
+    // Also accepts a SINGLE-character variant — many manuscripts use just
+    // "*" on its own line to mark a scene break — so long as the whole line
+    // (after trim) is exactly one ornament character.
+    const SCENE_BREAK_CHARS = "*#~\\-—–•∗⁎⋆✱✦❋※⁂‧";
     function isSectionBreak(p) {
       const t = (p || "").trim();
       if (!t) return false;
-      if (!/^[*#~\-—–•]+(?:\s+[*#~\-—–•]+)*$/.test(t)) return false;
+      const re = new RegExp("^[" + SCENE_BREAK_CHARS + "]+(?:\\s+[" + SCENE_BREAK_CHARS + "]+)*$");
+      if (!re.test(t)) return false;
+      // Either a single ornament character on its own line (e.g. "*", "•")
+      // or 3+ ornament chars total (e.g. "* * *", "***", "---").
       const chars = t.replace(/\s+/g, "");
+      if (chars.length === 1) return true;
       return chars.length >= 3;
+    }
+
+    // Split a chapter body into paragraphs, with two extras over the naïve
+    // split-on-blank-lines:
+    //   1. Markdown tables are preserved as a single paragraph (the row
+    //      newlines stay intact, the parser needs them).
+    //   2. Any line that is a scene-break ornament is PROMOTED to its own
+    //      paragraph, even if it has no blank lines around it. This handles
+    //      pastes from Word / Docs / Pages where the source treats "* * *"
+    //      as a normal soft-wrap inside surrounding prose, which would
+    //      otherwise merge the asterisks into the body and trip the
+    //      inline-run italic parser.
+    function splitChapterBody(body) {
+      const out = [];
+      const chunks = String(body || "").split(/\n\s*\n/);
+      for (const chunk of chunks) {
+        const t = chunk.trim();
+        if (!t) continue;
+        if (looksLikeMarkdownTable(t)) { out.push(t); continue; }
+        const lines = t.split("\n");
+        let buf = [];
+        function flush() {
+          if (buf.length === 0) return;
+          const joined = buf.join(" ").replace(/\s+/g, " ").trim();
+          if (joined) out.push(joined);
+          buf = [];
+        }
+        for (const line of lines) {
+          if (isSectionBreak(line)) {
+            flush();
+            out.push(line.trim());
+          } else {
+            buf.push(line);
+          }
+        }
+        flush();
+      }
+      return out;
     }
 
     function classifyParagraph(p) {
@@ -1640,14 +1689,10 @@
       function calcBodyPages(ch, startY) {
         const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside; // use recto for calc
         const maxY = SPEC.pageH - 50;
-        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) {
-          const trimmed = p.trim();
-          if (!trimmed) return "";
-          // Markdown tables: preserve the row newlines, the parser needs them.
-          if (looksLikeMarkdownTable(trimmed)) return trimmed;
-          // Prose: collapse soft wraps into a single space.
-          return trimmed.replace(/\n/g, " ");
-        }).filter(function(p) { return p; });
+        // splitChapterBody promotes embedded scene-break lines to their
+        // own paragraphs (handles pastes where "* * *" sits between prose
+        // with only single newlines around it).
+        const paragraphs = splitChapterBody(ch.body);
         let y = startY;
         let pages = 1;
         let isFirstPara = true;
@@ -1882,20 +1927,29 @@
       }
 
       // ---- PASS 2: RENDER TOC WITH CORRECT PAGE NUMBERS ----
+      // TOC typography (trade-book convention used by Penguin, Random House,
+      // O'Reilly, etc.):
+      //   * "Contents" heading: 18pt bold — smaller than the 20pt chapter
+      //     titles so the TOC reads as a reference, not a competing display.
+      //   * Entries: match SPEC.bodySize (10pt default / 11pt spacious) so
+      //     TOC rhythm is consistent with body text in the chapters.
+      //   * Row spacing: 2x line-height for breathing room without bloat.
       onProgress("Building table of contents...");
       newPage(); ty = 60;
-      doc.setFont(BODY_FONT, "bold"); doc.setFontSize(22); doc.setTextColor(30);
-      doc.text("Contents", getCenterX(), ty, { align: "center" }); ty += 50;
+      doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(30);
+      doc.text("Contents", getCenterX(), ty, { align: "center" }); ty += 44;
 
       const tocTextX = getTextX();
       const tocTextW = getTextWidth();
+      const tocEntrySize = SPEC.bodySize;
+      const tocRowAdvance = SPEC.lineHeight * 2;
 
       // Compute the widest page number actually in this TOC so that short books
       // (single-digit pages) do not waste a two-digit reservation and truncate titles.
       // Skip chapters flagged as excluded from the TOC (back matter like
       // "About the Author", "Acknowledgments", etc.) — their pages still
       // exist in the book but their rows do not appear in the TOC.
-      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11);
+      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize);
       let maxPageNumWidth = 0;
       for (let i = 0; i < chapters.length; i++) {
         if (chapters[i].includeInToc === false) continue;
@@ -1914,7 +1968,7 @@
         const displayTitle = ch.title || ch.num;
         const pageNumStr = String(chapterPageNumbers[i]);
 
-        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(11); doc.setTextColor(30);
+        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
 
         // Reserve: [title] [gap] [dots...] [gap] [page num, right aligned]
         const gap = 6;
@@ -1952,7 +2006,7 @@
           }
         }
 
-        ty += 30;
+        ty += tocRowAdvance;
         if (ty > SPEC.pageH - 80) { newPage(); ty = 60; }
       }
       newPage(); // blank after TOC
@@ -2008,15 +2062,9 @@
           y += 25; 
         }
 
-        // Body text with drop cap on first paragraph
-        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) {
-          const trimmed = p.trim();
-          if (!trimmed) return "";
-          // Markdown tables: preserve the row newlines, the parser needs them.
-          if (looksLikeMarkdownTable(trimmed)) return trimmed;
-          // Prose: collapse soft wraps into a single space.
-          return trimmed.replace(/\n/g, " ");
-        }).filter(function(p) { return p; });
+        // Body text with drop cap on first paragraph. Same splitter as
+        // pass 1 — scene-break lines are promoted to their own paragraphs.
+        const paragraphs = splitChapterBody(ch.body);
         let isFirstPara = true;
         const maxY = SPEC.pageH - 50;
         let pagesUsed = 0;
@@ -2526,12 +2574,8 @@
           body += '  <p class="epigraph">\u201C' + esc(ch.epigraph) + '\u201D</p>\n';
           if (ch.epigraphAttribution) body += '  <p class="epigraph-attribution">\u2013 ' + esc(ch.epigraphAttribution) + '</p>\n';
         }
-        const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) {
-          const trimmed = p.trim();
-          if (!trimmed) return "";
-          if (looksLikeMarkdownTable(trimmed)) return trimmed;
-          return trimmed.replace(/\n/g, " ");
-        }).filter(function(p) { return p; });
+        // Same scene-break-aware splitter as the PDF path.
+        const paragraphs = splitChapterBody(ch.body);
         for (const p of paragraphs) {
           // Image marker as a whole paragraph (either the new
           // 📷 filename — img-id form or the legacy ![alt](img-id) form).
