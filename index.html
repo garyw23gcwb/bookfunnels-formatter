@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.1",
+      version: "0.12.2",
       date: "2026-05-12",
       changes: [
+        "0.12.2 - Critical fix: chapter edits no longer get wiped when re-navigating through Step 2. Bug: the 'Detect Chapters →' button on Step 2 always re-ran detection from rawText and called setChapters(detected), overwriting any edits the user had made on Step 3. So the flow Step 3 → Back to Step 1 → forward through Step 2 → Step 3 silently lost every formatting / alignment / bold / italic / heading change. Fix: when chapters already exist, the Step 2 forward button just advances (no re-detection) and its label changes to 'Next: Edit Chapters →' to make this explicit. Re-detection from rawText is now only available via an explicit 'Re-detect chapters' link, which asks for confirmation before replacing the existing chapter list. Refactored the detection logic out of handleDetectChapters into a runChapterDetection helper so both the first-time-detect path and the explicit re-detect path stay in lockstep.",
         "0.12.1 - H2 / H3 heading spacing brought into line with industry convention. Previous values (hardcoded gapAbove ≈ 10pt, gapBelow = 4pt for H2; 7.5pt / 3pt for H3) produced a roughly 5:1 visible above-to-below ratio — too lopsided. Penguin / Random House / Chicago Manual all target ~2:1. New values express gaps as a fraction of body lineHeight so the rhythm scales with the body-size preset: H2 gapAbove = 0.65 × lineHeight, gapBelow = 0.55 × lineHeight; H3 = 0.5 × / 0.4 × respectively. Combined with the trailing paraGap from the previous paragraph, that lands the visible above-to-below ratio at ~2:1 for both default and spacious presets. Two-pass logic kept in lockstep so TOC page numbers stay accurate.",
         "0.12.0 - Per-paragraph alignment (left, center, right). Three new alignment buttons in the Step 3 toolbar (Word/Docs-style four-line SVG icons). They toggle a `:left:` / `:center:` / `:right:` prefix on the current line. Default body remains JUSTIFIED — publishing industry standard — and is unchanged for paragraphs without a marker. The legend on the right of the toolbar now explicitly reminds the user that body default is justified. Aligned paragraphs skip the justify path (so no rivers in narrow ragged text) and skip hyphenation. Works on body paragraphs AND on H2 / H3 subheadings, which is the most common use case. Mainly used for centered subheadings.  Untouched: drop-cap first paragraph, scene-break ornament, images, tables, title page, copyright, dedication, TOC, and the Reader Bonus / lead capture page (those have their own layout and ignore alignment markers). EPUB output emits inline `style=\"text-align:...\"` on the `<p>` / `<h2>` / `<h3>` so Apple Books, Kobo and Kindle honour the override consistently. Two-pass PDF renderer mirrored exactly so TOC page numbers stay accurate.",
         "0.11.9 - Two toolbar polish fixes. (1) Undo icon swapped from ↶ (a weak hook glyph that rendered as a tiny squiggle on most systems) to ↺ (anticlockwise open circle arrow) — the standard undo glyph in macOS / Word / Docs. Bumped the icon's font-size up a hair so it visually matches B/I/U weight. (2) Toolbar buttons no longer wrap their label across two lines when the toolbar is tight. Added whiteSpace:nowrap and flexShrink:0 to btnStyle, so '+ Image' and '+ Table' stay as a single line regardless of toolbar width.",
@@ -3938,24 +3939,46 @@
       };
 
       const updateBook = function(field, value) { setBookData(function(prev) { return Object.assign({}, prev, { [field]: value }); }); };
-      const handleDetectChapters = function() {
+      // Run actual chapter detection from rawText and replace the chapters
+      // state. Used by both "Detect Chapters →" (first time) and the
+      // explicit "Re-detect chapters" link.
+      const runChapterDetection = function() {
         console.log('=== Chapter Detection Debug ===');
         console.log('Raw text length:', rawText.length);
         console.log('Raw text (first 500 chars):', rawText.substring(0, 500));
-        console.log('Raw text (trimmed):', rawText.trim().length > 0);
-        
         const detected = detectChapters(rawText);
         console.log('Detected chapters:', detected.length);
         detected.forEach(function(ch, i) {
           console.log(`Chapter ${i + 1}:`, { num: ch.num, title: ch.title, bodyLength: ch.body.length });
         });
-        
         if (detected.length === 0) {
-          console.log('No chapters detected, creating single chapter with all text');
-          setChapters([{ id: Math.random().toString(36).slice(2), num: "Chapter 1", title: "Untitled", epigraph: "", epigraphAttribution: "", body: rawText }]);
-        } else { 
-          setChapters(detected); 
+          setChapters([{ id: Math.random().toString(36).slice(2), num: "Chapter 1", title: "Untitled", epigraph: "", epigraphAttribution: "", body: rawText, includeInToc: true, images: {} }]);
+        } else {
+          setChapters(detected);
         }
+      };
+
+      // Step 2 "forward" handler. CRITICAL: only re-runs detection when
+      // chapters is empty. If the user has already edited chapter bodies
+      // (formatting, alignment markers, etc.), navigating Step 1 → Step 2
+      // → Step 3 again must NOT overwrite their work. Re-detection from
+      // rawText is an explicit destructive action available via the
+      // "Re-detect chapters" link below the main button.
+      const handleDetectChapters = function() {
+        if (chapters.length === 0) {
+          runChapterDetection();
+        }
+        setStep(2);
+      };
+
+      // Explicit user-requested re-detection. Confirms first when chapters
+      // exist because this wipes any edits.
+      const handleRedetectChapters = function() {
+        if (chapters.length > 0) {
+          const ok = window.confirm("Re-detect chapters from the manuscript?\n\nThis REPLACES the existing chapter list. Any edits you have made to chapter titles, epigraphs, body text, formatting, or alignment will be lost.\n\nContinue?");
+          if (!ok) return;
+        }
+        runChapterDetection();
         setStep(2);
       };
       const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
@@ -4236,9 +4259,23 @@
                 <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }} onPaste={normalizePasteIntoTextarea}
                   placeholder="Paste your manuscript here..."
                   style={{ width: "100%", height: 400, padding: 16, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, color: BRAND.textPrimary, fontSize: 13, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.6, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20, gap: 12, flexWrap: "wrap" }}>
                   <Button variant="secondary" onClick={function() { setStep(0); }}>&larr; Back</Button>
-                  <Button onClick={handleDetectChapters} disabled={!rawText.trim()}>Detect Chapters &rarr;</Button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    {chapters.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleRedetectChapters}
+                        title="Re-run chapter detection from the manuscript text. This REPLACES the existing chapters — any edits you have made to chapter content or formatting will be lost."
+                        style={{ background: "transparent", border: "none", color: BRAND.textMuted, fontSize: 12, cursor: "pointer", textDecoration: "underline", fontFamily: FONT, padding: "6px 4px" }}
+                      >
+                        Re-detect chapters
+                      </button>
+                    )}
+                    <Button onClick={handleDetectChapters} disabled={!rawText.trim()}>
+                      {chapters.length === 0 ? "Detect Chapters →" : "Next: Edit Chapters →"}
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
