@@ -131,8 +131,8 @@
     };
 
     const APP_VERSION = {
-      version: "0.10.0",
-      date: "2026-05-11",
+      version: "0.10.1",
+      date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
         "0.9.3 - Upgrade hyphenation to true Knuth-Liang via the Hypher library + the en-us pattern file. Both ship CommonJS, so they're loaded in <head> with a small module.exports shim that exposes Hypher and the patterns as window.__tbf_Hypher / window.__tbf_HyphenPatterns. hyphenateWord() now picks the Knuth-Liang result when Hypher is available and falls back to the v0.9.0 rule-based hyphenator if either script fails to load (offline, blocked, etc.) so there is no failure mode. Visible improvements over rule-based: 'something' breaks as some-thing (was so-mething), 'running' as run-ning (was runn-ing), 'started' stays whole because no clean 2/3 split exists (was star-ted), 'philosophy' offers phi-los-o-phy (was phi-losophy / philo-sophy), 'recognition' as recog-ni-tion (was four sub-optimal splits). Total CDN payload: ~7 KB hypher + ~27 KB patterns, served from jsDelivr.",
@@ -1465,11 +1465,16 @@
           // Image block. Look up the image in chapter.images, compute its
           // rendered size, and reserve that vertical space. If it would
           // overflow the current page, push it to a new page.
+          //
+          // Spacing: we want visible padding on both sides of the image that
+          // looks even. The previous block already left `paraGap` of trailing
+          // space — backtrack that and substitute a symmetric IMAGE_GAP both
+          // above and below. The image renderer below DOES NOT add a trailing
+          // paraGap because IMAGE_GAP handles separation from the next block.
           if (cls.type === "image") {
+            const IMAGE_GAP = SPEC.lineHeight; // visible padding above & below
             const img = ch.images && ch.images[cls.imageId];
             if (!img || !img.dataUrl) {
-              // Missing image — reserve a single body line for an inline
-              // placeholder so the dry run still matches the render.
               if (y > maxY) { pages++; y = bodyTopY(); }
               y += SPEC.lineHeight + SPEC.paraGap;
               continue;
@@ -1477,10 +1482,14 @@
             const maxImageW = textW;
             const maxImageH = (SPEC.pageH - bodyTopY() - 50) * 0.85;
             const size = computeImageRenderSize(img.naturalWidth, img.naturalHeight, maxImageW, maxImageH);
-            if (y + size.height > maxY) {
+            // Roll back the previous block's trailing paraGap so it doesn't
+            // stack on top of IMAGE_GAP, then add IMAGE_GAP above.
+            y = y - SPEC.paraGap + IMAGE_GAP;
+            // Page break if the image + below-image gap wouldn't fit.
+            if (y + size.height + IMAGE_GAP > maxY) {
               pages++; y = bodyTopY();
             }
-            y += size.height + SPEC.paraGap;
+            y += size.height + IMAGE_GAP;
             continue;
           }
 
@@ -1797,11 +1806,16 @@
           // stay accurate. Center horizontally inside the text column, draw
           // via jsPDF's addImage. If the image won't fit on the current page
           // do a clean page break first (header + footer follow).
+          //
+          // Spacing: ensure even visible padding above and below the image.
+          // The previous block already added a small trailing paraGap; we
+          // roll that back and substitute IMAGE_GAP (one line height) on
+          // each side. The image renderer DOES NOT then add paraGap below
+          // because IMAGE_GAP already handles separation from the next block.
           if (cls.type === "image") {
+            const IMAGE_GAP = SPEC.lineHeight;
             const img = ch.images && ch.images[cls.imageId];
             if (!img || !img.dataUrl) {
-              // Missing image — draw a small placeholder text in italic so
-              // the author sees something is wrong, and advance one line.
               if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
               doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
               doc.text("[missing image: " + cls.imageId + "]", textX, y + BASELINE_OFFSET);
@@ -1812,7 +1826,10 @@
             const maxImageW = textW;
             const maxImageH = (SPEC.pageH - bodyTopY() - 50) * 0.85;
             const size = computeImageRenderSize(img.naturalWidth, img.naturalHeight, maxImageW, maxImageH);
-            if (y + size.height > maxY) {
+            // Roll back previous paraGap, then add IMAGE_GAP above.
+            y = y - SPEC.paraGap + IMAGE_GAP;
+            // Page break if the image + below-image gap wouldn't fit.
+            if (y + size.height + IMAGE_GAP > maxY) {
               newPage(); pagesUsed++;
               addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
@@ -1823,14 +1840,11 @@
             try {
               doc.addImage(img.dataUrl, fmt.jsPdfFormat, drawX, y, size.width, size.height);
             } catch (e) {
-              // jsPDF can throw on unsupported formats or malformed data.
-              // Fall back to the inline placeholder so the dry run / render
-              // page counts stay aligned.
               doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
               doc.text("[image error: " + cls.imageId + "]", textX, y + BASELINE_OFFSET);
               doc.setTextColor(30); resetBodyFont();
             }
-            y += size.height + SPEC.paraGap;
+            y += size.height + IMAGE_GAP;
             continue;
           }
 
