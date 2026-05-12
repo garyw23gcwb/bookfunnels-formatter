@@ -6,6 +6,7 @@
   <title>Tinybook Formatter - bookfunnels.io</title>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@1&family=Gelasio:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js"></script>
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
@@ -131,7 +132,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.10.3",
+      version: "0.11.0",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -490,6 +491,110 @@
       return null;
     }
 
+    // =====================================================================
+    // Markdown table support.
+    //
+    // Body paragraphs whose lines all start and end with "|" and that
+    // include a separator row ( |---|---| optionally with :--: alignment
+    // markers ) are recognized as tables. Renders via jspdf-autotable
+    // in the PDF and as native <table> in the EPUB.
+    //
+    // Standard markdown syntax:
+    //   | Col A | Col B | Col C |
+    //   |-------|-------|-------|
+    //   | a     | b     | c     |
+    //   | d     | e     | f     |
+    // Alignment markers: |:---| left, |---:| right, |:--:| center.
+    // =====================================================================
+
+    // Cheap detection — only checks structural signals, doesn't parse the
+    // whole thing. Used by the paragraph splitter to decide whether to
+    // collapse internal newlines (no for tables — the row structure has
+    // to survive parsing).
+    function looksLikeMarkdownTable(text) {
+      const lines = String(text || "").split("\n").map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+      if (lines.length < 2) return false;
+      if (!/^\|.*\|$/.test(lines[0])) return false;
+      // The second non-empty line must be the separator row
+      return /^\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|$/.test(lines[1]);
+    }
+
+    // Parse a markdown table text block into { headers, rows, alignments }
+    // or null if the structure is malformed (caller should fall back to
+    // rendering the paragraph as prose).
+    function parseMarkdownTable(text) {
+      const lines = String(text || "").split("\n").map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+      if (lines.length < 2) return null;
+      function splitRow(line) {
+        // Strip the outer pipes, split on the inner ones, trim each cell.
+        return line.replace(/^\|/, "").replace(/\|$/, "").split("|").map(function(c) { return c.trim(); });
+      }
+      if (!/^\|.*\|$/.test(lines[0])) return null;
+      if (!/^\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|$/.test(lines[1])) return null;
+      const headers = splitRow(lines[0]);
+      const sepCells = splitRow(lines[1]);
+      const alignments = sepCells.map(function(c) {
+        const left = c.startsWith(":");
+        const right = c.endsWith(":");
+        if (left && right) return "center";
+        if (right) return "right";
+        return "left";
+      });
+      const rows = [];
+      for (let i = 2; i < lines.length; i++) {
+        if (!/^\|.*\|$/.test(lines[i])) continue;
+        const cells = splitRow(lines[i]);
+        // Pad / truncate to match header count
+        while (cells.length < headers.length) cells.push("");
+        if (cells.length > headers.length) cells.length = headers.length;
+        rows.push(cells);
+      }
+      return { headers: headers, rows: rows, alignments: alignments };
+    }
+
+    // Build the jspdf-autotable options object for a parsed markdown table,
+    // anchored to our text column and styled to match the rest of the book.
+    // Used by both the pass-1 dry-run (measure on a temp doc) and pass 2
+    // (render on the real doc) so the page-count and the visual output
+    // agree exactly.
+    function buildAutoTableOptions(table, textX, textW, startY, bodyTopYValue) {
+      const tableMargin = {
+        left: textX,
+        right: SPEC.pageW - (textX + textW),
+        top: bodyTopYValue,
+      };
+      const columnStyles = {};
+      (table.alignments || []).forEach(function(a, i) {
+        columnStyles[i] = { halign: a };
+      });
+      return {
+        startY: startY,
+        head: [table.headers],
+        body: table.rows,
+        margin: tableMargin,
+        tableWidth: textW,
+        columnStyles: columnStyles,
+        styles: {
+          font: "helvetica", // overridden in pass 2 once fonts are loaded
+          fontSize: SPEC.bodySize,
+          cellPadding: 4,
+          textColor: [30, 30, 30],
+          lineColor: [180, 180, 180],
+          lineWidth: 0.4,
+          overflow: "linebreak",
+          valign: "top",
+        },
+        headStyles: {
+          fillColor: [240, 240, 240],
+          textColor: [30, 30, 30],
+          fontStyle: "bold",
+          lineColor: [120, 120, 120],
+          lineWidth: 0.5,
+        },
+        alternateRowStyles: { fillColor: [250, 250, 250] },
+      };
+    }
+
     // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
     // width. ALL VALUES ARE ZERO. The previous tuck table tried to pull body text into
     // letters with empty space on the right (L, T, F, P, Y, etc.) but this caused
@@ -759,6 +864,12 @@
     function classifyParagraph(p) {
       if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
       if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
+      // Markdown table block. Detected BEFORE images so a stray pipe in
+      // an image marker can't fool the table detector.
+      if (looksLikeMarkdownTable(p)) {
+        const table = parseMarkdownTable(p);
+        if (table) return { type: "table", table: table };
+      }
       // Image marker as a whole paragraph. Recognized in either the new
       // (📷 filename — img-id) or legacy (![alt](img-id)) form via the
       // parseImageMarker() helper. Only matches when the marker occupies
@@ -1444,7 +1555,14 @@
       function calcBodyPages(ch, startY) {
         const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside; // use recto for calc
         const maxY = SPEC.pageH - 50;
-        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) {
+          const trimmed = p.trim();
+          if (!trimmed) return "";
+          // Markdown tables: preserve the row newlines, the parser needs them.
+          if (looksLikeMarkdownTable(trimmed)) return trimmed;
+          // Prose: collapse soft wraps into a single space.
+          return trimmed.replace(/\n/g, " ");
+        }).filter(function(p) { return p; });
         let y = startY;
         let pages = 1;
         let isFirstPara = true;
@@ -1520,6 +1638,43 @@
               pages++; y = bodyTopY();
             }
             y += size.height + IMAGE_GAP;
+            continue;
+          }
+
+          // Table block. Measure the rendered height on a sacrificial jsPDF
+          // instance (jspdf-autotable can't be asked for a height without
+          // actually drawing), then reserve that space in the dry-run page
+          // count so the TOC stays accurate.
+          if (cls.type === "table") {
+            const TABLE_GAP = SPEC.lineHeight; // same symmetric padding as images
+            y = y - SPEC.paraGap + TABLE_GAP;
+            let tableHeight = 0;
+            let tablePagesUsed = 0;
+            try {
+              const tempDoc = new (window.jspdf ? window.jspdf.jsPDF : jsPDF)({ unit: "pt", format: [SPEC.pageW, SPEC.pageH], compress: true });
+              const startPage = tempDoc.internal.getNumberOfPages();
+              tempDoc.autoTable(buildAutoTableOptions(cls.table, SPEC.margins.recto.inside, textW, y, bodyTopY()));
+              const endPage = tempDoc.internal.getNumberOfPages();
+              tablePagesUsed = endPage - startPage;
+              tableHeight = tempDoc.lastAutoTable.finalY - y;
+            } catch (e) {
+              // Fallback: rough estimate if autotable isn't available
+              tableHeight = (cls.table.rows.length + 1) * (SPEC.lineHeight + 8);
+            }
+            if (tablePagesUsed > 0) {
+              pages += tablePagesUsed;
+              // After autotable spans pages, y resumes at top of the last
+              // page (since autotable's finalY is page-relative to the last
+              // page it drew on). Approximate by setting y to bodyTopY() +
+              // any remaining content on the final page.
+              y = bodyTopY() + ((tableHeight % SPEC.pageH) || 0);
+            } else {
+              if (y + tableHeight + TABLE_GAP > maxY) {
+                pages++; y = bodyTopY();
+              }
+              y += tableHeight;
+            }
+            y += TABLE_GAP;
             continue;
           }
 
@@ -1755,7 +1910,14 @@
         }
 
         // Body text with drop cap on first paragraph
-        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        const paragraphs = ch.body.split(/\n\s*\n/).map(function(p) {
+          const trimmed = p.trim();
+          if (!trimmed) return "";
+          // Markdown tables: preserve the row newlines, the parser needs them.
+          if (looksLikeMarkdownTable(trimmed)) return trimmed;
+          // Prose: collapse soft wraps into a single space.
+          return trimmed.replace(/\n/g, " ");
+        }).filter(function(p) { return p; });
         let isFirstPara = true;
         const maxY = SPEC.pageH - 50;
         let pagesUsed = 0;
@@ -1875,6 +2037,50 @@
               doc.setTextColor(30); resetBodyFont();
             }
             y += size.height + IMAGE_GAP;
+            continue;
+          }
+
+          // Table block. Render with jspdf-autotable. We hook didDrawPage so
+          // when autotable spans multiple pages, our running header + page
+          // number get drawn on each new page just like a normal page break.
+          if (cls.type === "table") {
+            const TABLE_GAP = SPEC.lineHeight;
+            y = y - SPEC.paraGap + TABLE_GAP;
+            // If the table can't fit any rows on the current page, push to next
+            // page first so autotable doesn't start with just the header.
+            const minTableHeight = (SPEC.lineHeight + 8) * 2; // header + 1 row roughly
+            if (y + minTableHeight > maxY) {
+              newPage(); pagesUsed++;
+              addRunningHeader(ch.title || ch.num || "");
+              addPageNumber(bookPageNum + pagesUsed);
+              y = bodyTopY(); resetBodyFont();
+            }
+            const opts = buildAutoTableOptions(cls.table, textX, textW, y, bodyTopY());
+            // Use the same body font that the rest of the chapter uses.
+            opts.styles.font = BODY_FONT;
+            opts.headStyles.font = BODY_FONT;
+            // Track new pages autotable creates so our running header /
+            // page number appear on them too.
+            const chTitle = ch.title || ch.num || "";
+            opts.didDrawPage = function(data) {
+              if (data.pageNumber > 1) {
+                pageNum++;
+                pagesUsed++;
+                addRunningHeader(chTitle);
+                addPageNumber(bookPageNum + pagesUsed);
+              }
+            };
+            try {
+              doc.autoTable(opts);
+              y = doc.lastAutoTable.finalY + TABLE_GAP;
+            } catch (e) {
+              console.warn("Table render failed:", e);
+              doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
+              doc.text("[table render error]", textX, y + BASELINE_OFFSET);
+              doc.setTextColor(30); resetBodyFont();
+              y += SPEC.lineHeight + TABLE_GAP;
+            }
+            resetBodyFont();
             continue;
           }
 
@@ -2080,6 +2286,10 @@
         // Centered block image (body image markers ![alt](img-id))
         'p.figure { text-align: center; margin: 1.5em 0; }',
         'p.figure img { max-width: 100%; height: auto; }',
+        // Markdown tables — reflowable, accessible, native to the EPUB reader.
+        'table.md-table { border-collapse: collapse; margin: 1.5em 0; width: 100%; font-size: 0.95em; }',
+        'table.md-table th, table.md-table td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }',
+        'table.md-table th { background: #eee; font-weight: bold; text-align: left; }',
         'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
@@ -2189,7 +2399,12 @@
           body += '  <p class="epigraph">\u201C' + esc(ch.epigraph) + '\u201D</p>\n';
           if (ch.epigraphAttribution) body += '  <p class="epigraph-attribution">\u2013 ' + esc(ch.epigraphAttribution) + '</p>\n';
         }
-        const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
+        const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) {
+          const trimmed = p.trim();
+          if (!trimmed) return "";
+          if (looksLikeMarkdownTable(trimmed)) return trimmed;
+          return trimmed.replace(/\n/g, " ");
+        }).filter(function(p) { return p; });
         for (const p of paragraphs) {
           // Image marker as a whole paragraph (either the new
           // 📷 filename — img-id form or the legacy ![alt](img-id) form).
@@ -2212,6 +2427,31 @@
               body += '  <p class="figure"><em>[missing image: ' + esc(id) + ']</em></p>\n';
             }
             continue;
+          }
+          // Markdown table block → native <table> with <thead>/<tbody>.
+          // EPUB readers reflow these correctly and they remain
+          // searchable / selectable / accessible.
+          if (looksLikeMarkdownTable(p)) {
+            const table = parseMarkdownTable(p);
+            if (table) {
+              let tableHtml = '  <table class="md-table">\n    <thead>\n      <tr>';
+              for (let ci2 = 0; ci2 < table.headers.length; ci2++) {
+                const align = (table.alignments[ci2] || "left");
+                tableHtml += '<th style="text-align:' + align + '">' + esc(table.headers[ci2]) + '</th>';
+              }
+              tableHtml += '</tr>\n    </thead>\n    <tbody>\n';
+              for (const row of table.rows) {
+                tableHtml += '      <tr>';
+                for (let ci2 = 0; ci2 < row.length; ci2++) {
+                  const align = (table.alignments[ci2] || "left");
+                  tableHtml += '<td style="text-align:' + align + '">' + esc(row[ci2]) + '</td>';
+                }
+                tableHtml += '</tr>\n';
+              }
+              tableHtml += '    </tbody>\n  </table>\n';
+              body += tableHtml;
+              continue;
+            }
           }
           if (p.startsWith("## ")) body += '  <h2>' + esc(p.slice(3).trim()) + '</h2>\n';
           else body += '  <p>' + esc(p) + '</p>\n';
@@ -2503,6 +2743,25 @@
                 style={{ display: "none" }}
               />
             )}
+            <button
+              type="button"
+              title="Insert a markdown table template at the cursor. Edit the cells to taste; the PDF and EPUB will render it as a real table."
+              onMouseDown={swallowFocus}
+              onClick={function() {
+                // Minimal usable template: 2 columns × 2 data rows + header.
+                // The separator row is what marks this as a table in the parser.
+                const template = [
+                  "| Header 1 | Header 2 |",
+                  "|----------|----------|",
+                  "| Cell 1   | Cell 2   |",
+                  "| Cell 3   | Cell 4   |",
+                ].join("\n");
+                insertBlockAtCursor(template);
+              }}
+              style={btnStyle}
+            >
+              + Table
+            </button>
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
           </div>
