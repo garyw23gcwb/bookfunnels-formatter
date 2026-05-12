@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.10.1",
+      version: "0.10.2",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -2326,39 +2326,53 @@
     // understand. Toolbar handlers either wrap the current selection in markers
     // (B / I / U) or toggle a line prefix (H2 / H3) on the line containing
     // the cursor.
-    function RichTextInput({ label, value, onChange, rows, onImageUpload }) {
+    const RichTextInput = React.forwardRef(function RichTextInput({ label, value, onChange, rows, onImageUpload }, ref) {
       rows = rows || 8;
       const taRef = React.useRef(null);
       const fileInputRef = React.useRef(null);
       const [imageBusy, setImageBusy] = useState(false);
 
-      // Insert a block image marker at the current cursor position, surrounded
-      // by blank lines so it parses as its own paragraph. Asks the parent
-      // (ChapterCard) to actually stash the bytes and assign an id.
+      // Helper: insert arbitrary text at the textarea's current cursor
+      // position, surrounded by blank lines so a paragraph-level marker
+      // (like an image marker) becomes its own paragraph.
+      function insertBlockAtCursor(insertText) {
+        const ta = taRef.current; if (!ta) return;
+        const start = ta.selectionStart || 0;
+        const end = ta.selectionEnd || 0;
+        const before = value.slice(0, start);
+        const after = value.slice(end);
+        const leftPad = (before.length === 0 || /\n\n$/.test(before)) ? "" : (before.endsWith("\n") ? "\n" : "\n\n");
+        const rightPad = (after.length === 0 || /^\n\n/.test(after)) ? "" : (after.startsWith("\n") ? "\n" : "\n\n");
+        const insertion = leftPad + insertText + rightPad;
+        const newValue = before + insertion + after;
+        onChange(newValue);
+        const newPos = start + insertion.length;
+        requestAnimationFrame(function() {
+          const t = taRef.current; if (!t) return;
+          t.focus({ preventScroll: true });
+          try { t.setSelectionRange(newPos, newPos); } catch (e) {}
+        });
+      }
+
+      // Imperative API exposed to parents (e.g. ChapterCard's image gallery
+      // uses it when the user clicks "Re-insert" on a previously-uploaded
+      // image — we need to drop the marker at the current cursor position
+      // inside this textarea).
+      React.useImperativeHandle(ref, function() {
+        return {
+          insertAtCursor: function(text) { insertBlockAtCursor(text); },
+        };
+      });
+
+      // Insert a block image marker at the current cursor position. Asks
+      // the parent (ChapterCard) to stash the bytes and assign an id.
       const handleImagePick = function(file) {
         if (!file || !onImageUpload) return;
         setImageBusy(true);
         Promise.resolve(onImageUpload(file)).then(function(meta) {
           if (!meta || !meta.id) return;
           const alt = meta.alt || "";
-          const marker = "![" + alt + "](" + meta.id + ")";
-          const ta = taRef.current; if (!ta) { setImageBusy(false); return; }
-          const start = ta.selectionStart || 0;
-          const end = ta.selectionEnd || 0;
-          const before = value.slice(0, start);
-          const after = value.slice(end);
-          // Ensure blank line above and below so the marker becomes its own paragraph.
-          const leftPad = (before.length === 0 || /\n\n$/.test(before)) ? "" : (before.endsWith("\n") ? "\n" : "\n\n");
-          const rightPad = (after.length === 0 || /^\n\n/.test(after)) ? "" : (after.startsWith("\n") ? "\n" : "\n\n");
-          const insertion = leftPad + marker + rightPad;
-          const newValue = before + insertion + after;
-          onChange(newValue);
-          const newPos = start + insertion.length;
-          requestAnimationFrame(function() {
-            const t = taRef.current; if (!t) return;
-            t.focus({ preventScroll: true });
-            try { t.setSelectionRange(newPos, newPos); } catch (e) {}
-          });
+          insertBlockAtCursor("![" + alt + "](" + meta.id + ")");
         }).catch(function(e) {
           console.warn("Image upload failed:", e);
         }).then(function() {
@@ -2465,6 +2479,52 @@
             style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
         </div>
       );
+    });
+
+    // ImageGallery: thumbnails of every image uploaded to a chapter, with
+    // Re-insert (drops the marker back into the body at the cursor) and
+    // Remove (deletes from chapter.images AND strips the markers from the
+    // body text). Renders nothing if the chapter has no images, so the
+    // chapter card stays compact for text-only chapters.
+    function ImageGallery({ chapter, onReinsert, onRemove }) {
+      const images = chapter.images || {};
+      const ids = Object.keys(images);
+      if (ids.length === 0) return null;
+      const cardStyle = { width: 150, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 8, padding: 8, fontSize: 11, fontFamily: FONT, boxSizing: "border-box" };
+      const thumbStyle = { width: "100%", height: 90, background: BRAND.bgSubtle, borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 8, overflow: "hidden", border: "1px solid " + BRAND.borderLight };
+      const markerStyle = { fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 10, color: BRAND.textMuted, background: BRAND.bgSubtle, padding: "3px 6px", borderRadius: 4, marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+      const reinsertBtn = { flex: 1, padding: "5px 6px", fontSize: 11, fontFamily: FONT, fontWeight: 600, background: BRAND.white, color: BRAND.accentDeep, border: "1px solid " + BRAND.border, borderRadius: 4, cursor: "pointer" };
+      const removeBtn = { padding: "5px 10px", fontSize: 11, fontFamily: FONT, color: BRAND.danger, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 4, cursor: "pointer" };
+      return (
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid " + BRAND.borderLight }}>
+          <div style={{ fontSize: 12, fontFamily: FONT, color: BRAND.textSecondary, marginBottom: 12, fontWeight: 500 }}>
+            Images in this chapter ({ids.length})
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            {ids.map(function(id) {
+              const img = images[id];
+              const altDefault = (img && img.filename ? img.filename : id).replace(/\.[^.]+$/, "");
+              return (
+                <div key={id} style={cardStyle}>
+                  <div style={thumbStyle}>
+                    <img src={img && img.dataUrl} alt={img && img.filename || ""} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }} />
+                  </div>
+                  <div style={{ color: BRAND.textPrimary, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }} title={img && img.filename || ""}>
+                    {img && img.filename ? img.filename : id}
+                  </div>
+                  <div style={markerStyle} title={"![" + altDefault + "](" + id + ")"}>
+                    {"![" + altDefault + "](" + id + ")"}
+                  </div>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button type="button" onClick={function() { onReinsert(id, altDefault); }} style={reinsertBtn}>Re-insert</button>
+                    <button type="button" onClick={function() { onRemove(id); }} style={removeBtn} title="Remove this image AND any markers referencing it from the body text">Remove</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
     }
 
     function Button({ children, onClick, variant, disabled, style: extraStyle }) {
@@ -2515,6 +2575,9 @@
     function ChapterCard({ chapter, index, onEdit, onRemove }) {
       const [expanded, setExpanded] = useState(false);
       const wordCount = chapter.body.split(/\s+/).filter(Boolean).length;
+      // Ref to the body RichTextInput so the ImageGallery's Re-insert
+      // button can drop a marker at the textarea's current cursor.
+      const richTextRef = React.useRef(null);
       return (
         <div style={{ background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, padding: 16, marginBottom: 8 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -2561,6 +2624,7 @@
               </label>
 
               <RichTextInput
+                ref={richTextRef}
                 label="Body Text"
                 value={chapter.body}
                 onChange={function(v) { onEdit(chapter.id, "body", v); }}
@@ -2584,6 +2648,31 @@
                   });
                   onEdit(chapter.id, "images", newImages);
                   return { id: id, alt: altDefault };
+                }}
+              />
+
+              <ImageGallery
+                chapter={chapter}
+                onReinsert={function(id, alt) {
+                  if (richTextRef.current && richTextRef.current.insertAtCursor) {
+                    richTextRef.current.insertAtCursor("![" + alt + "](" + id + ")");
+                  }
+                }}
+                onRemove={function(id) {
+                  // Drop the image from the chapter's image map and strip
+                  // every marker that references it from the body text.
+                  // (Leaving stale markers would render as "[missing
+                  // image: id]" placeholders in the PDF, which is worse.)
+                  const newImages = Object.assign({}, chapter.images || {});
+                  delete newImages[id];
+                  onEdit(chapter.id, "images", newImages);
+                  const escapedId = String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                  const pattern = new RegExp("\\n*!\\[[^\\]]*\\]\\(" + escapedId + "\\)\\n*", "g");
+                  const oldBody = chapter.body || "";
+                  const newBody = oldBody.replace(pattern, "\n\n").replace(/\n{3,}/g, "\n\n");
+                  if (newBody !== oldBody) {
+                    onEdit(chapter.id, "body", newBody);
+                  }
                 }}
               />
             </div>
