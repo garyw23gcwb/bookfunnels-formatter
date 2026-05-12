@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.4",
+      version: "0.11.5",
       date: "2026-05-12",
       changes: [
+        "0.11.5 - Scene-break ornament support. Three centered asterisks (or `***`, `---`, `# # #`, `~ ~ ~`, `• • •`) on their own line are now recognised as a trade-book scene-break marker and rendered as a centered `* * *` ornament with one line of breathing room above and below — both in the PDF and the EPUB. Previously a line like `* * *` was passed through to the inline-run parser, which interpreted the asterisks as italic markers and produced garbage. New helper `isSectionBreak(p)` runs FIRST inside classifyParagraph, before any markdown-marker detection, so the ornament is detected and rendered as a discrete `scenebreak` block in both rendering passes. Scene breaks do not consume the drop-cap-on-first-paragraph flag, so a chapter that opens with a scene break still drops the cap on the next real body paragraph. EPUB path emits `<p class=\"scene-break\">* * *</p>` with letter-spacing and vertical margin so readers across Apple Books, Kobo and Kindle display the transition consistently.",
         "0.11.4 - Multi-project support. The top-right corner now has a Project picker (📚 dropdown) listing every book you've started in this browser, with name (auto-derived from the book title), a one-line description (chapter count · word count · last edited), and a delete X per row. The bottom of the dropdown has a '+ New Project' entry to start a fresh blank slate without losing the current one — exactly like drafting a new email while keeping your other drafts. Each project has its own bookData, manuscript, chapters, step, and text-size preset, all persisted via a new localStorage key 'tinybook-formatter-projects' (one-time migration from the v0.7.9 single-project key happens silently on first load). The Clear Content button is renamed 'Clear This Project' and now only resets the active slot — it no longer deletes anything from localStorage, so other projects stay safe. Implementation: ProjectPicker is a self-contained component (outside-click closes, sorted active-first then by lastModified desc); switching / creating / deleting all snapshot the current form state into the active slot before transitioning so unsaved work isn't lost.",
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
         "0.9.3 - Upgrade hyphenation to true Knuth-Liang via the Hypher library + the en-us pattern file. Both ship CommonJS, so they're loaded in <head> with a small module.exports shim that exposes Hypher and the patterns as window.__tbf_Hypher / window.__tbf_HyphenPatterns. hyphenateWord() now picks the Knuth-Liang result when Hypher is available and falls back to the v0.9.0 rule-based hyphenator if either script fails to load (offline, blocked, etc.) so there is no failure mode. Visible improvements over rule-based: 'something' breaks as some-thing (was so-mething), 'running' as run-ning (was runn-ing), 'started' stays whole because no clean 2/3 split exists (was star-ted), 'philosophy' offers phi-los-o-phy (was phi-losophy / philo-sophy), 'recognition' as recog-ni-tion (was four sub-optimal splits). Total CDN payload: ~7 KB hypher + ~27 KB patterns, served from jsDelivr.",
@@ -923,7 +924,29 @@
       }
     }
 
+    // Detect a "scene break" / section break paragraph. Trade-book typography
+    // uses three centered asterisks (or similar ornament) on their own line to
+    // mark a narrative transition inside a chapter. Naïvely letting this fall
+    // through to the inline-run parser would interpret "* * *" as italic
+    // markers and produce garbage. So we detect it here BEFORE classification
+    // continues into the markdown-lite parser.
+    //
+    // Accepts any line that is made up entirely of the ornament characters
+    // (asterisk, hash, tilde, hyphen, em/en-dash, bullet) optionally separated
+    // by whitespace, with at least 3 ornament characters total. Examples:
+    //   "* * *", "***", "---", "# # #", "~ ~ ~", "• • •".
+    function isSectionBreak(p) {
+      const t = (p || "").trim();
+      if (!t) return false;
+      if (!/^[*#~\-—–•]+(?:\s+[*#~\-—–•]+)*$/.test(t)) return false;
+      const chars = t.replace(/\s+/g, "");
+      return chars.length >= 3;
+    }
+
     function classifyParagraph(p) {
+      // Scene break first — must precede any markdown-marker detection so
+      // "* * *" is never mistaken for italic markers downstream.
+      if (isSectionBreak(p)) return { type: "scenebreak" };
       if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
       if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
       // Markdown table block. Detected BEFORE images so a stray pipe in
@@ -1740,6 +1763,20 @@
             continue;
           }
 
+          // Scene break ornament ("* * *"). Reserve one line above, one line
+          // for the ornament, one line below — roughly 3 line-heights of
+          // vertical space. Does NOT consume isFirstPara: a chapter that
+          // opens with a break still drops the cap on the first body
+          // paragraph that follows.
+          if (cls.type === "scenebreak") {
+            const needed = SPEC.lineHeight * 3;
+            if (y + needed > maxY) { pages++; y = bodyTopY(); }
+            y += SPEC.lineHeight;       // space above
+            y += SPEC.lineHeight;       // ornament line
+            y += SPEC.lineHeight;       // space below
+            continue;
+          }
+
           // H2 / H3 headings. Smart break: never let a heading dangle alone at
           // the bottom of a page — reserve ~2 body lines beneath it.
           if (cls.type === "h2" || cls.type === "h3") {
@@ -2146,6 +2183,29 @@
             continue;
           }
 
+          // Scene break ornament. Draws three centered asterisks at body
+          // size on the text-block midline, with one line of breathing room
+          // above and below. Mirrors the dry-run height accounting in
+          // calcBodyPages so the TOC stays accurate.
+          if (cls.type === "scenebreak") {
+            const needed = SPEC.lineHeight * 3;
+            if (y + needed > maxY) {
+              newPage(); pagesUsed++;
+              addRunningHeader(ch.title || ch.num || "");
+              addPageNumber(bookPageNum + pagesUsed);
+              y = bodyTopY(); resetBodyFont();
+            }
+            y += SPEC.lineHeight;  // breathing room above
+            doc.setFont(BODY_FONT, "normal");
+            doc.setFontSize(SPEC.bodySize);
+            doc.setTextColor(30);
+            doc.text("* * *", getCenterX(), y + BASELINE_OFFSET, { align: "center" });
+            y += SPEC.lineHeight;  // ornament line
+            y += SPEC.lineHeight;  // breathing room below
+            resetBodyFont();
+            continue;
+          }
+
           // H2 / H3 headings. Reserve at least 2 body lines beneath so the
           // heading does not dangle alone at the bottom of a page.
           if (cls.type === "h2" || cls.type === "h3") {
@@ -2354,6 +2414,9 @@
         'table.md-table { border-collapse: collapse; margin: 1.5em 0; width: 100%; font-size: 0.9em; }',
         'table.md-table td { border: 0.5px solid #d0d0d0; padding: 5px 7px; vertical-align: top; }',
         'table.md-table th { border: 1px solid #8c8c8c; background: #f0f0f0; font-weight: bold; text-align: left; padding: 6px 7px; vertical-align: top; }',
+        // Scene break ornament: three centered asterisks separated by spaces,
+        // wide breathing room above and below to read clearly as a transition.
+        'p.scene-break { text-align: center; margin: 1.8em 0; letter-spacing: 0.5em; }',
         'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
@@ -2516,6 +2579,14 @@
               body += tableHtml;
               continue;
             }
+          }
+          // Scene break ornament. Detected the same way as the PDF path
+          // (matches "* * *", "***", "---", etc.) and rendered as a
+          // centered <p class="scene-break"> so EPUB readers display the
+          // same visible transition.
+          if (isSectionBreak(p)) {
+            body += '  <p class="scene-break">* * *</p>\n';
+            continue;
           }
           if (p.startsWith("## ")) body += '  <h2>' + esc(p.slice(3).trim()) + '</h2>\n';
           else body += '  <p>' + esc(p) + '</p>\n';
