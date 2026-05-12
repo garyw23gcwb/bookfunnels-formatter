@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.3",
+      version: "0.11.4",
       date: "2026-05-12",
       changes: [
+        "0.11.4 - Multi-project support. The top-right corner now has a Project picker (📚 dropdown) listing every book you've started in this browser, with name (auto-derived from the book title), a one-line description (chapter count · word count · last edited), and a delete X per row. The bottom of the dropdown has a '+ New Project' entry to start a fresh blank slate without losing the current one — exactly like drafting a new email while keeping your other drafts. Each project has its own bookData, manuscript, chapters, step, and text-size preset, all persisted via a new localStorage key 'tinybook-formatter-projects' (one-time migration from the v0.7.9 single-project key happens silently on first load). The Clear Content button is renamed 'Clear This Project' and now only resets the active slot — it no longer deletes anything from localStorage, so other projects stay safe. Implementation: ProjectPicker is a self-contained component (outside-click closes, sorted active-first then by lastModified desc); switching / creating / deleting all snapshot the current form state into the active slot before transitioning so unsaved work isn't lost.",
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
         "0.9.3 - Upgrade hyphenation to true Knuth-Liang via the Hypher library + the en-us pattern file. Both ship CommonJS, so they're loaded in <head> with a small module.exports shim that exposes Hypher and the patterns as window.__tbf_Hypher / window.__tbf_HyphenPatterns. hyphenateWord() now picks the Knuth-Liang result when Hypher is available and falls back to the v0.9.0 rule-based hyphenator if either script fails to load (offline, blocked, etc.) so there is no failure mode. Visible improvements over rule-based: 'something' breaks as some-thing (was so-mething), 'running' as run-ning (was runn-ing), 'started' stays whole because no clean 2/3 split exists (was star-ted), 'philosophy' offers phi-los-o-phy (was phi-losophy / philo-sophy), 'recognition' as recog-ni-tion (was four sub-optimal splits). Total CDN payload: ~7 KB hypher + ~27 KB patterns, served from jsDelivr.",
         "0.9.2 - Fix empty main content area on page load. The v0.7.9 autosave persisted the current 'step' value to localStorage, but a user who last left the app on Step 4 (Download) would reload to a blank card: the Step 4 render is gated by 'step === 4 && (pdfUrl || epubUrl)', and pdfUrl / epubUrl are blob URLs that only live for the current session — they aren't (and shouldn't be) persisted. On reload, step was 4 but the URLs were gone, so nothing rendered. Fixed by clamping the restored step from 4 to 3 (Preview) so the user lands somewhere actionable and can regenerate.",
@@ -3060,54 +3061,248 @@
 
     /* ---- Main App ---- */
 
-    // Key under which Step 1-3 form state is mirrored to localStorage. Bumping
-    // this string would invalidate any in-progress work for existing users, so
-    // do not change it casually.
+    // Legacy single-project autosave key (kept for one-time migration).
     const AUTOSAVE_KEY = "tinybook-formatter-state";
+    // Multi-project store. Shape: { activeId, projects: { id: projectState } }
+    // where projectState = { bookData, rawText, chapters, step, textSizePreset,
+    // lastModified }. Image bytes are stripped before save (same as before).
+    const PROJECTS_KEY = "tinybook-formatter-projects";
+
+    const BLANK_BOOK_DATA = {
+      title: "", subtitle: "", author: "", publisher: "", isbn: "",
+      dedication: "", copyrightText: "",
+      ctaTitle: "", ctaBody: "", ctaUrl: "",
+    };
+
+    function makeProjectId() {
+      return "p-" + Math.random().toString(36).slice(2, 8) + "-" + Date.now().toString(36);
+    }
+
+    function blankProject() {
+      return {
+        bookData: Object.assign({}, BLANK_BOOK_DATA),
+        rawText: "",
+        chapters: [],
+        step: 0,
+        textSizePreset: "default",
+        lastModified: Date.now(),
+      };
+    }
+
+    function clampRestoredStep(s) {
+      // Step 4 (Download) needs pdfUrl/epubUrl which are session-only.
+      // Clamp back to Step 3 (Preview) so reload doesn't land on a blank card.
+      if (typeof s !== "number") return 0;
+      if (s >= 4) return 3;
+      return s;
+    }
+
+    // Load the projects store on first render. Tries the new key first,
+    // then migrates the legacy single-project autosave if present, then
+    // falls back to a fresh blank project. Returns { activeId, projects }.
+    function loadInitialProjects() {
+      try {
+        const raw = localStorage.getItem(PROJECTS_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.projects && parsed.activeId && parsed.projects[parsed.activeId]) {
+            // Sanitize: clamp step on every project so restored state is safe.
+            for (const id in parsed.projects) {
+              const p = parsed.projects[id];
+              if (p) p.step = clampRestoredStep(p.step);
+            }
+            return parsed;
+          }
+        }
+      } catch (e) { /* fall through */ }
+      // Migrate from legacy key.
+      try {
+        const legacy = localStorage.getItem(AUTOSAVE_KEY);
+        if (legacy) {
+          const old = JSON.parse(legacy);
+          if (old && (old.bookData || old.rawText || (Array.isArray(old.chapters) && old.chapters.length > 0))) {
+            const id = makeProjectId();
+            const proj = {
+              bookData: Object.assign({}, BLANK_BOOK_DATA, old.bookData || {}),
+              rawText: typeof old.rawText === "string" ? old.rawText : "",
+              chapters: Array.isArray(old.chapters) ? old.chapters : [],
+              step: clampRestoredStep(old.step),
+              textSizePreset: old.textSizePreset || "default",
+              lastModified: Date.now(),
+            };
+            return { activeId: id, projects: { [id]: proj } };
+          }
+        }
+      } catch (e) { /* fall through */ }
+      // Fresh start.
+      const id = makeProjectId();
+      return { activeId: id, projects: { [id]: blankProject() } };
+    }
+
+    // Auto-derive the display name from the book title. Falls back to
+    // "Untitled" when the title field is empty. (Project naming choice 1A.)
+    function getProjectName(project) {
+      const t = ((project && project.bookData && project.bookData.title) || "").trim();
+      return t || "Untitled";
+    }
+
+    function relativeTimeString(ts) {
+      if (!ts) return "just now";
+      const ago = (Date.now() - ts) / 1000;
+      if (ago < 60) return "just now";
+      if (ago < 3600) return Math.floor(ago / 60) + "m ago";
+      if (ago < 86400) return Math.floor(ago / 3600) + "h ago";
+      return Math.floor(ago / 86400) + "d ago";
+    }
+
+    function describeProject(project) {
+      if (!project) return "";
+      const chCount = (project.chapters || []).length;
+      let wordCount = 0;
+      for (const c of (project.chapters || [])) {
+        wordCount += (c.body || "").split(/\s+/).filter(Boolean).length;
+      }
+      if (chCount === 0 && project.rawText) {
+        wordCount = (project.rawText || "").split(/\s+/).filter(Boolean).length;
+      }
+      const time = relativeTimeString(project.lastModified);
+      if (chCount > 0) {
+        return chCount + " chapter" + (chCount === 1 ? "" : "s") + " · " + wordCount.toLocaleString() + " words · " + time;
+      }
+      if (wordCount > 0) {
+        return wordCount.toLocaleString() + " words · " + time;
+      }
+      return "empty · " + time;
+    }
+
+    // Dropdown picker in the top-right header. Renders the active project's
+    // name + chevron; opens a flat list of all saved projects with a "+ New
+    // Project" entry at the bottom. Closes on outside click.
+    function ProjectPicker({ projects, activeId, onSwitch, onCreate, onDelete }) {
+      const [open, setOpen] = useState(false);
+      const rootRef = React.useRef(null);
+
+      React.useEffect(function() {
+        if (!open) return;
+        function onDocClick(e) {
+          if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+        }
+        document.addEventListener("mousedown", onDocClick);
+        return function() { document.removeEventListener("mousedown", onDocClick); };
+      }, [open]);
+
+      const ids = Object.keys(projects).sort(function(a, b) {
+        if (a === activeId) return -1;
+        if (b === activeId) return 1;
+        const ta = (projects[a] && projects[a].lastModified) || 0;
+        const tb = (projects[b] && projects[b].lastModified) || 0;
+        return tb - ta;
+      });
+      const activeName = getProjectName(projects[activeId]);
+
+      const headerStyle = { padding: "10px 12px", fontSize: 10, color: BRAND.textMuted, fontFamily: FONT, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: "1px solid " + BRAND.borderLight };
+      const newBtnStyle = { padding: "10px 12px", cursor: "pointer", color: BRAND.accentDeep, fontSize: 12, fontFamily: FONT, fontWeight: 600, borderTop: "1px solid " + BRAND.borderLight };
+
+      return (
+        <div ref={rootRef} style={{ position: "relative" }}>
+          <button
+            type="button"
+            onClick={function() { setOpen(!open); }}
+            title="Switch project, start a new draft, or delete an existing one"
+            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textPrimary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, maxWidth: 220 }}
+          >
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📚 {activeName}</span>
+            <span style={{ color: BRAND.textMuted, fontSize: 10 }}>{open ? "▲" : "▼"}</span>
+          </button>
+          {open && (
+            <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 6, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.08)", minWidth: 320, maxWidth: 400, zIndex: 100 }}>
+              <div style={headerStyle}>Switch Project</div>
+              {ids.map(function(id) {
+                const proj = projects[id];
+                const isActive = id === activeId;
+                return (
+                  <div
+                    key={id}
+                    onClick={function() { if (!isActive) onSwitch(id); setOpen(false); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", cursor: isActive ? "default" : "pointer", background: isActive ? BRAND.bgSubtle : "transparent" }}
+                    onMouseEnter={function(e) { if (!isActive) e.currentTarget.style.background = BRAND.bgSubtle; }}
+                    onMouseLeave={function(e) { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: isActive ? 700 : 500, color: BRAND.textPrimary, fontFamily: FONT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {isActive ? "● " : ""}{getProjectName(proj)}
+                      </div>
+                      <div style={{ fontSize: 11, color: BRAND.textMuted, fontFamily: FONT, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {describeProject(proj)}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={function(e) {
+                        e.stopPropagation();
+                        const name = getProjectName(proj);
+                        if (window.confirm("Delete project \"" + name + "\"?\n\nRemoves its title, manuscript, chapters, dedication, CTA and any saved progress. No undo.\n\nContinue?")) {
+                          onDelete(id);
+                          setOpen(false);
+                        }
+                      }}
+                      title="Delete this project (no undo)"
+                      style={{ padding: "4px 8px", fontSize: 14, fontFamily: FONT, color: BRAND.danger + "aa", background: "transparent", border: "none", cursor: "pointer", flexShrink: 0, lineHeight: 1 }}
+                    >×</button>
+                  </div>
+                );
+              })}
+              <div
+                onClick={function() { onCreate(); setOpen(false); }}
+                style={newBtnStyle}
+                onMouseEnter={function(e) { e.currentTarget.style.background = BRAND.bgSubtle; }}
+                onMouseLeave={function(e) { e.currentTarget.style.background = "transparent"; }}
+              >+ New Project</div>
+            </div>
+          )}
+        </div>
+      );
+    }
 
     function TinybookFormatter() {
-      // Hydrate previously-saved form state on first render so a tab refresh,
-      // crash, or accidental close does not wipe an in-progress book.
-      // Wrapped in useMemo so the localStorage read only happens once per
-      // component instance, not on every render.
-      const initialSaved = React.useMemo(function() {
-        try {
-          const raw = localStorage.getItem(AUTOSAVE_KEY);
-          return raw ? JSON.parse(raw) : null;
-        } catch (e) { return null; }
-      }, []);
+      // Hydrate the project store on first render. Reads PROJECTS_KEY (the
+      // multi-project store), falls back to one-time migration from the
+      // legacy AUTOSAVE_KEY single-project blob, then to a fresh blank.
+      // Wrapped in useMemo so the localStorage read happens once per
+      // component instance.
+      const initialStore = React.useMemo(loadInitialProjects, []);
+      const initialProject = initialStore.projects[initialStore.activeId] || blankProject();
 
-      // Restore the previous step from autosave, but clamp Step 4 (Download)
-      // back to Step 3 (Preview). pdfUrl / epubUrl are blob URLs that only
-      // exist for the current session — they aren't persisted to localStorage
-      // — so if a user reloads while on the Download step they would see a
-      // page rendered against step=4 with no PDF/EPUB to show, which presents
-      // as an empty card. Sending them to Preview lets them regenerate.
-      const [step, setStep] = useState(function() {
-        const s = initialSaved && typeof initialSaved.step === "number" ? initialSaved.step : 0;
-        return s >= 4 ? 3 : s;
-      });
+      // The full projects map and which one is active. Updated only on
+      // switch / create / delete events. The autosave effect mirrors the
+      // current form-state into the active slot.
+      const [projects, setProjects] = useState(initialStore.projects);
+      const [activeProjectId, setActiveProjectId] = useState(initialStore.activeId);
+
+      // Form state for the ACTIVE project. clampRestoredStep already runs
+      // inside loadInitialProjects, so Step 4 (Download) is safely demoted
+      // to Step 3 (Preview): pdfUrl / epubUrl are session-only blob URLs.
+      const [step, setStep] = useState(initialProject.step);
       const [generating, setGenerating] = useState(false);
       const [progress, setProgress] = useState("");
       const [error, setError] = useState("");
       const [pdfUrl, setPdfUrl] = useState(null);
       const [epubUrl, setEpubUrl] = useState(null);
-      const [textSizePreset, setTextSizePreset] = useState(initialSaved && initialSaved.textSizePreset ? initialSaved.textSizePreset : 'default');
-      const [bookData, setBookData] = useState(initialSaved && initialSaved.bookData ? initialSaved.bookData : { title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
-      const [rawText, setRawText] = useState(initialSaved && typeof initialSaved.rawText === "string" ? initialSaved.rawText : "");
-      const [chapters, setChapters] = useState(initialSaved && Array.isArray(initialSaved.chapters) ? initialSaved.chapters : []);
+      const [textSizePreset, setTextSizePreset] = useState(initialProject.textSizePreset || 'default');
+      const [bookData, setBookData] = useState(Object.assign({}, BLANK_BOOK_DATA, initialProject.bookData || {}));
+      const [rawText, setRawText] = useState(typeof initialProject.rawText === "string" ? initialProject.rawText : "");
+      const [chapters, setChapters] = useState(Array.isArray(initialProject.chapters) ? initialProject.chapters : []);
 
       const [showChangelog, setShowChangelog] = useState(false);
 
-      // Autosave: 400ms debounced write of Step 1-3 form state to localStorage.
-      // Triggered every time bookData / rawText / chapters / step /
-      // textSizePreset changes. Wrapped in try/catch because localStorage can
-      // throw (private mode, quota exceeded, disabled).
+      // Autosave: 400ms debounced write of the active project's form state
+      // into the projects map, then persist the whole map to localStorage.
+      // Triggered every time the form state or active project changes.
       // Image bytes (chapter.images data URLs) are stripped before save —
       // they're session-only by design because a few base64 PNGs would blow
-      // the 5-10 MB origin quota. The body-text markers `![alt](img-id)`
-      // are still saved, so on reload the user only re-uploads images, not
-      // the surrounding text.
+      // the 5-10 MB origin quota. The body-text markers (e.g. "📷 file —
+      // img-id") still save, so on reload the user only re-uploads images,
+      // not the surrounding text.
       React.useEffect(function() {
         const handle = setTimeout(function() {
           try {
@@ -3116,17 +3311,23 @@
               delete out.images;
               return out;
             });
-            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
-              step: step,
-              textSizePreset: textSizePreset,
+            const snapshot = {
               bookData: bookData,
               rawText: rawText,
               chapters: chaptersForSave,
-            }));
+              step: step,
+              textSizePreset: textSizePreset,
+              lastModified: Date.now(),
+            };
+            setProjects(function(prev) {
+              const next = Object.assign({}, prev, { [activeProjectId]: snapshot });
+              try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: activeProjectId, projects: next })); } catch (e) { /* ignore */ }
+              return next;
+            });
           } catch (e) { /* ignore — disabled, full, or private mode */ }
         }, 400);
         return function() { clearTimeout(handle); };
-      }, [step, textSizePreset, bookData, rawText, chapters]);
+      }, [step, textSizePreset, bookData, rawText, chapters, activeProjectId]);
 
       // Iframe height reporter: when this app is embedded inside an iframe on
       // a hosting page, post the current document height to the parent on
@@ -3163,9 +3364,10 @@
         setStep(0);
       };
 
-      // Reset every form field and the autosave so the user can start a
-      // fresh book without remnants of the previous one. Confirmed because
-      // it wipes work that may not be backed up anywhere else.
+      // Reset every form field on the CURRENT project so the user can start
+      // it over without affecting the other projects in the picker. The
+      // autosave effect will mirror the cleared state into the projects map
+      // on the next tick.
       const handleClearAll = function() {
         const hasContent = (
           rawText.trim().length > 0 ||
@@ -3176,10 +3378,10 @@
           (bookData.dedication || "").trim().length > 0
         );
         if (hasContent) {
-          const ok = window.confirm("Clear all content?\n\nThis removes the current book's title, manuscript, chapters, dedication, CTA, and any uploaded images. The autosaved copy in this browser is also deleted.\n\nThere is no undo. Continue?");
+          const ok = window.confirm("Clear this project?\n\nResets the current project to a blank state — title, manuscript, chapters, dedication, CTA, and any uploaded images. Other projects in the picker are untouched.\n\nNo undo. Continue?");
           if (!ok) return;
         }
-        setBookData({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
+        setBookData(Object.assign({}, BLANK_BOOK_DATA));
         setRawText("");
         setChapters([]);
         setStep(0);
@@ -3188,7 +3390,91 @@
         setError("");
         setProgress("");
         setTextSizePreset('default');
-        try { localStorage.removeItem(AUTOSAVE_KEY); } catch (e) {}
+      };
+
+      // Helper used by all three project handlers — bundles the current form
+      // state into a saveable snapshot (image bytes stripped, lastModified
+      // stamped) so the active project's slot stays accurate when switching
+      // away from it.
+      const snapshotCurrent = function() {
+        const chaptersForSave = chapters.map(function(c) {
+          const out = Object.assign({}, c);
+          delete out.images;
+          return out;
+        });
+        return {
+          bookData: bookData,
+          rawText: rawText,
+          chapters: chaptersForSave,
+          step: step,
+          textSizePreset: textSizePreset,
+          lastModified: Date.now(),
+        };
+      };
+
+      // Load a stored project into the form state. Used by switch and delete.
+      const loadProjectIntoForm = function(target) {
+        setBookData(Object.assign({}, BLANK_BOOK_DATA, target.bookData || {}));
+        setRawText(target.rawText || "");
+        setChapters(Array.isArray(target.chapters) ? target.chapters : []);
+        setStep(clampRestoredStep(target.step));
+        setTextSizePreset(target.textSizePreset || "default");
+        setPdfUrl(null);
+        setEpubUrl(null);
+        setError("");
+        setProgress("");
+      };
+
+      const handleSwitchProject = function(newId) {
+        if (newId === activeProjectId) return;
+        const target = projects[newId];
+        if (!target) return;
+        const nextProjects = Object.assign({}, projects, { [activeProjectId]: snapshotCurrent() });
+        loadProjectIntoForm(target);
+        setProjects(nextProjects);
+        setActiveProjectId(newId);
+        try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: newId, projects: nextProjects })); } catch (e) {}
+      };
+
+      const handleCreateProject = function() {
+        const newId = makeProjectId();
+        const newProj = blankProject();
+        const nextProjects = Object.assign({}, projects, { [activeProjectId]: snapshotCurrent(), [newId]: newProj });
+        loadProjectIntoForm(newProj);
+        setProjects(nextProjects);
+        setActiveProjectId(newId);
+        try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: newId, projects: nextProjects })); } catch (e) {}
+      };
+
+      const handleDeleteProject = function(id) {
+        const nextProjects = Object.assign({}, projects);
+        delete nextProjects[id];
+        if (id === activeProjectId) {
+          // Active was deleted — switch to most-recently-modified remaining,
+          // or fall back to a fresh blank if none remain.
+          const remaining = Object.keys(nextProjects);
+          if (remaining.length === 0) {
+            const freshId = makeProjectId();
+            const fresh = blankProject();
+            nextProjects[freshId] = fresh;
+            loadProjectIntoForm(fresh);
+            setProjects(nextProjects);
+            setActiveProjectId(freshId);
+            try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: freshId, projects: nextProjects })); } catch (e) {}
+          } else {
+            remaining.sort(function(a, b) {
+              return ((nextProjects[b] && nextProjects[b].lastModified) || 0) - ((nextProjects[a] && nextProjects[a].lastModified) || 0);
+            });
+            const newActive = remaining[0];
+            loadProjectIntoForm(nextProjects[newActive]);
+            setProjects(nextProjects);
+            setActiveProjectId(newActive);
+            try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: newActive, projects: nextProjects })); } catch (e) {}
+          }
+        } else {
+          setProjects(nextProjects);
+          try { localStorage.setItem(PROJECTS_KEY, JSON.stringify({ activeId: activeProjectId, projects: nextProjects })); } catch (e) {}
+        }
       };
 
       const updateBook = function(field, value) { setBookData(function(prev) { return Object.assign({}, prev, { [field]: value }); }); };
@@ -3370,14 +3656,21 @@
 
       return (
         <div style={{ minHeight: "100vh", background: BRAND.bgPage, color: BRAND.textPrimary, fontFamily: FONT }}>
-          {/* Top utility bar - version + sample data + clear */}
+          {/* Top utility bar - project picker + sample data + clear + version */}
           <div style={{ position: "absolute", top: 16, right: 20, display: "flex", alignItems: "center", gap: 10, zIndex: 10 }}>
+            <ProjectPicker
+              projects={projects}
+              activeId={activeProjectId}
+              onSwitch={handleSwitchProject}
+              onCreate={handleCreateProject}
+              onDelete={handleDeleteProject}
+            />
             <button onClick={loadSampleData} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
             <button
               onClick={handleClearAll}
-              title="Reset the formatter to a blank state. Removes the current book's content and the autosaved copy in this browser. Use this when starting a new book."
+              title="Reset the current project to a blank state. Other projects in the picker are untouched. Use this when you want to reuse the active slot for a new book."
               style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.danger, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}
-            >Clear Content</button>
+            >Clear This Project</button>
             <button onClick={function() { setShowChangelog(!showChangelog); }} style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textMuted, cursor: "pointer", fontSize: 10, fontFamily: FONT, fontWeight: 600 }}>v{APP_VERSION.version}</button>
           </div>
 
