@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.6",
+      version: "0.11.7",
       date: "2026-05-12",
       changes: [
+        "0.11.7 - Three fixes. (1) Scene-break ornament now stays visually centered on every page, not just the first page of a chapter. Root cause: the chapter render loop captured textX once at chapter open (recto position, x=66) and reused it on every subsequent page — so when body wrapped to a verso the text block stayed at the recto x while getCenterX() correctly shifted to the verso center, making the centered \"* * *\" appear off-center relative to the body text around it. Fix: textX and textW are now `let` and re-captured after every newPage() call inside the chapter loop, so the mirrored verso/recto margins are honoured on every page. (2) The Step 1 body-text-size description now reads \"Choose between default and spacious settings\" — removed the project-specific reference. (3) Reaffirms v0.11.6: TOC entry font already follows the body-size preset selector (10pt default / 11pt spacious), via tocEntrySize = SPEC.bodySize.",
         "0.11.6 - Scene-break robustness + TOC typography. (1) Scene breaks (\"* * *\", \"***\", \"---\", etc.) now get promoted to their own paragraph even when the paste only has single newlines around them — previously a paste from Word / Docs / Pages that did not preserve a full blank line between prose and the break let the asterisks fall back into the surrounding body, where the inline-run parser interpreted them as italic markers and produced a stray single star. New helper splitChapterBody() runs at the top of pass 1, pass 2, and the EPUB chapter loop; it splits on blank lines as before, then walks each chunk and promotes any line that matches isSectionBreak. Expanded the ornament regex to include the unicode asterisk variants Word / Pages / InDesign sometimes substitute (∗ ⁎ ⋆ ✱ ✦ ❋ ※ ⁂ ‧) and to accept a single ornament character alone on a line (e.g. just \"*\"). (2) TOC typography brought into line with trade-book convention used by Penguin, Random House, O'Reilly: \"Contents\" heading drops from 22pt to 18pt so it no longer competes with the 20pt chapter titles; entries drop from a hardcoded 11pt to SPEC.bodySize (so 10pt in default preset, 11pt in spacious) so the rhythm matches the body; row spacing tightens from a flat 30pt to 2x line-height. Result reads as a reference page, not a display page.",
         "0.11.5 - Scene-break ornament support. Three centered asterisks (or `***`, `---`, `# # #`, `~ ~ ~`, `• • •`) on their own line are now recognised as a trade-book scene-break marker and rendered as a centered `* * *` ornament with one line of breathing room above and below — both in the PDF and the EPUB. Previously a line like `* * *` was passed through to the inline-run parser, which interpreted the asterisks as italic markers and produced garbage. New helper `isSectionBreak(p)` runs FIRST inside classifyParagraph, before any markdown-marker detection, so the ornament is detected and rendered as a discrete `scenebreak` block in both rendering passes. Scene breaks do not consume the drop-cap-on-first-paragraph flag, so a chapter that opens with a scene break still drops the cap on the next real body paragraph. EPUB path emits `<p class=\"scene-break\">* * *</p>` with letter-spacing and vertical margin so readers across Apple Books, Kobo and Kindle display the transition consistently.",
         "0.11.4 - Multi-project support. The top-right corner now has a Project picker (📚 dropdown) listing every book you've started in this browser, with name (auto-derived from the book title), a one-line description (chapter count · word count · last edited), and a delete X per row. The bottom of the dropdown has a '+ New Project' entry to start a fresh blank slate without losing the current one — exactly like drafting a new email while keeping your other drafts. Each project has its own bookData, manuscript, chapters, step, and text-size preset, all persisted via a new localStorage key 'tinybook-formatter-projects' (one-time migration from the v0.7.9 single-project key happens silently on first load). The Clear Content button is renamed 'Clear This Project' and now only resets the active slot — it no longer deletes anything from localStorage, so other projects stay safe. Implementation: ProjectPicker is a self-contained component (outside-click closes, sorted active-first then by lastModified desc); switching / creating / deleting all snapshot the current form state into the active slot before transitioning so unsaved work isn't lost.",
@@ -2023,8 +2024,13 @@
         if (!isRecto()) newPage();
         
         bookPageNum = chapterPageNumbers[ci];
-        const textW = getTextWidth();
-        const textX = getTextX();
+        // textX/textW are mutable across the chapter render because the
+        // mirrored verso/recto margins flip the text-block X position on
+        // every page boundary. They MUST be re-captured after every
+        // newPage() call inside this loop — see the bodyTopY() + resetBodyFont
+        // pattern below, which now also refreshes textX/textW.
+        let textW = getTextWidth();
+        let textX = getTextX();
         let y = 55;
 
         // Chapter number label. If there's no number (section pages like "Making It
@@ -2115,7 +2121,7 @@
               const lines = layoutRunsMixed(doc, runs, widths, SPEC.bodySize, BODY_FONT);
               doc.setTextColor(30);
               for (let li = 0; li < lines.length; li++) {
-                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+                if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
                 const x = li < SPEC.dropCapLines ? textX + dropCapWidth : textX;
                 drawRunLine(doc, lines[li], x, y + BASELINE_OFFSET, SPEC.bodySize, BODY_FONT);
                 y += SPEC.lineHeight;
@@ -2130,7 +2136,7 @@
             const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
             const lines = breakIntoJustifiedLines(doc, restText, widths, SPEC.bodySize, BODY_FONT);
             for (let li = 0; li < lines.length; li++) {
-              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
               const isNarrow = li < SPEC.dropCapLines;
               const lineX = isNarrow ? textX + dropCapWidth : textX;
               const lineMaxW = isNarrow ? narrowWidth : textW;
@@ -2155,7 +2161,7 @@
             const IMAGE_GAP = SPEC.lineHeight;
             const img = ch.images && ch.images[cls.imageId];
             if (!img || !img.dataUrl) {
-              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
               doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(120);
               doc.text("[missing image: " + cls.imageId + "]", textX, y + BASELINE_OFFSET);
               doc.setTextColor(30); resetBodyFont();
@@ -2172,7 +2178,7 @@
               newPage(); pagesUsed++;
               addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
-              y = bodyTopY(); resetBodyFont();
+              y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
             }
             const drawX = textX + (textW - size.width) / 2;
             const fmt = getImageFormatFromDataUrl(img.dataUrl);
@@ -2200,7 +2206,7 @@
               newPage(); pagesUsed++;
               addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
-              y = bodyTopY(); resetBodyFont();
+              y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
             }
             const opts = buildAutoTableOptions(cls.table, textX, textW, y, bodyTopY());
             // Use the same body font that the rest of the chapter uses.
@@ -2241,7 +2247,7 @@
               newPage(); pagesUsed++;
               addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
-              y = bodyTopY(); resetBodyFont();
+              y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
             }
             y += SPEC.lineHeight;  // breathing room above
             doc.setFont(BODY_FONT, "normal");
@@ -2282,7 +2288,7 @@
             if (y + needed > maxY) {
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
               addPageNumber(bookPageNum + pagesUsed);
-              y = bodyTopY(); resetBodyFont();
+              y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
             }
 
             y += gapAbove;
@@ -2327,17 +2333,17 @@
                 if (linesOnCurrentPage > 0) {
                   newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
                   addPageNumber(bookPageNum + pagesUsed);
-                  y = bodyTopY(); resetBodyFont();
+                  y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
                 }
               } else if (linesOnCurrentPage > 0 && linesOnCurrentPage <= WIDOW_ORPHAN.minLinesAtPageEnd && remainingLines > 0) {
                 newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
                 addPageNumber(bookPageNum + pagesUsed);
-                y = bodyTopY(); resetBodyFont();
+                y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
               }
             }
 
             for (const line of runLines) {
-              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
               drawRunLine(doc, line, textX, y + BASELINE_OFFSET, SPEC.bodySize, BODY_FONT);
               y += SPEC.lineHeight;
             }
@@ -2391,7 +2397,7 @@
           // convention so end-of-paragraph stretching doesn't leave awkward
           // gaps on a typically-short final line.
           for (let li = 0; li < lines.length; li++) {
-            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); }
+            if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
             const isLastLine = li === lines.length - 1;
             drawJustifiedLine(doc, lines[li], textX, y + BASELINE_OFFSET, textW, isLastLine);
             y += SPEC.lineHeight;
@@ -3822,7 +3828,7 @@
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Body Text Size</div>
-                      <div style={{ fontSize: 12, color: BRAND.textMuted, fontFamily: FONT }}>Choose between default or Lisa-style spacing</div>
+                      <div style={{ fontSize: 12, color: BRAND.textMuted, fontFamily: FONT }}>Choose between default and spacious settings</div>
                     </div>
                     <select 
                       value={textSizePreset} 
