@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.9",
+      version: "0.12.0",
       date: "2026-05-12",
       changes: [
+        "0.12.0 - Per-paragraph alignment (left, center, right). Three new alignment buttons in the Step 3 toolbar (Word/Docs-style four-line SVG icons). They toggle a `:left:` / `:center:` / `:right:` prefix on the current line. Default body remains JUSTIFIED — publishing industry standard — and is unchanged for paragraphs without a marker. The legend on the right of the toolbar now explicitly reminds the user that body default is justified. Aligned paragraphs skip the justify path (so no rivers in narrow ragged text) and skip hyphenation. Works on body paragraphs AND on H2 / H3 subheadings, which is the most common use case. Mainly used for centered subheadings.  Untouched: drop-cap first paragraph, scene-break ornament, images, tables, title page, copyright, dedication, TOC, and the Reader Bonus / lead capture page (those have their own layout and ignore alignment markers). EPUB output emits inline `style=\"text-align:...\"` on the `<p>` / `<h2>` / `<h3>` so Apple Books, Kobo and Kindle honour the override consistently. Two-pass PDF renderer mirrored exactly so TOC page numbers stay accurate.",
         "0.11.9 - Two toolbar polish fixes. (1) Undo icon swapped from ↶ (a weak hook glyph that rendered as a tiny squiggle on most systems) to ↺ (anticlockwise open circle arrow) — the standard undo glyph in macOS / Word / Docs. Bumped the icon's font-size up a hair so it visually matches B/I/U weight. (2) Toolbar buttons no longer wrap their label across two lines when the toolbar is tight. Added whiteSpace:nowrap and flexShrink:0 to btnStyle, so '+ Image' and '+ Table' stay as a single line regardless of toolbar width.",
         "0.11.8 - Undo button in the chapter body editor. The toolbar in Step 3 now has an Undo (↶) button at the leftmost position; Cmd+Z (Mac) / Ctrl+Z (Win/Linux) also triggers undo. Each RichTextInput keeps its own undo stack (capped at 100 entries) — snapshots are pushed before any toolbar action (B/I/U, H2/H3, image insert, table insert) and at the start of each typing burst (with a 700ms idle commit). Switching chapters mounts a fresh editor with an empty stack so there's no cross-chapter bleed. The button auto-disables when there's nothing to undo. Replaces the browser's native undo, which was unreliable because the textarea is React-controlled (programmatic edits bypassed the browser's stack and some browsers cleared it whenever the value prop changed).",
         "0.11.7 - Three fixes. (1) Scene-break ornament now stays visually centered on every page, not just the first page of a chapter. Root cause: the chapter render loop captured textX once at chapter open (recto position, x=66) and reused it on every subsequent page — so when body wrapped to a verso the text block stayed at the recto x while getCenterX() correctly shifted to the verso center, making the centered \"* * *\" appear off-center relative to the body text around it. Fix: textX and textW are now `let` and re-captured after every newPage() call inside the chapter loop, so the mirrored verso/recto margins are honoured on every page. (2) The Step 1 body-text-size description now reads \"Choose between default and spacious settings\" — removed the project-specific reference. (3) Reaffirms v0.11.6: TOC entry font already follows the body-size preset selector (10pt default / 11pt spacious), via tocEntrySize = SPEC.bodySize.",
@@ -995,16 +996,37 @@
       return out;
     }
 
+    // Detect an alignment prefix at the start of a paragraph. Returns
+    // { align: "left"|"center"|"right"|null, text: rest }. Markers are
+    //   :left:   :center:   :right:
+    // Toolbar buttons in RichTextInput toggle these prefixes at the start
+    // of the current line, so the user never has to type them by hand.
+    // Default body text remains JUSTIFIED — these prefixes are an explicit
+    // per-paragraph override, mainly intended for centered subheadings.
+    function parseAlignment(text) {
+      const m = /^:(left|center|right):\s*/i.exec(text || "");
+      if (!m) return { align: null, text: text };
+      return { align: m[1].toLowerCase(), text: text.slice(m[0].length) };
+    }
+
     function classifyParagraph(p) {
       // Scene break first — must precede any markdown-marker detection so
       // "* * *" is never mistaken for italic markers downstream.
       if (isSectionBreak(p)) return { type: "scenebreak" };
-      if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
-      if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
+      // Alignment prefix is extracted BEFORE heading / table / image
+      // classification so it can apply to any paragraph variant. Tables
+      // and images ignore alignment (they have their own layout), but
+      // stripping the marker still lets downstream detection work even
+      // if a user prefixed an alignment marker by accident.
+      const aligned = parseAlignment(p);
+      const align = aligned.align;
+      const working = aligned.text;
+      if (/^###\s+/.test(working)) return { type: "h3", text: working.replace(/^###\s+/, ""), align: align };
+      if (/^##\s+/.test(working)) return { type: "h2", text: working.replace(/^##\s+/, ""), align: align };
       // Markdown table block. Detected BEFORE images so a stray pipe in
       // an image marker can't fool the table detector.
-      if (looksLikeMarkdownTable(p)) {
-        const table = parseMarkdownTable(p);
+      if (looksLikeMarkdownTable(working)) {
+        const table = parseMarkdownTable(working);
         if (table) return { type: "table", table: table };
       }
       // Image marker as a whole paragraph. Recognized in either the new
@@ -1012,9 +1034,35 @@
       // parseImageMarker() helper. Only matches when the marker occupies
       // the entire paragraph after whitespace collapse, so accidental
       // inline markers in prose don't turn into floating images.
-      const img = parseImageMarker(p);
+      const img = parseImageMarker(working);
       if (img) return { type: "image", alt: img.alt, imageId: img.imageId };
-      return { type: "body", text: p };
+      return { type: "body", text: working, align: align };
+    }
+
+    // Compute the x at which a line of the given width should start, given
+    // the paragraph's alignment. Used by the PDF renderer to position
+    // aligned headings and body lines.
+    //   left  → flush with textX (left edge of text block)
+    //   right → flush with textX + textW (right edge)
+    //   center → centered in the text block
+    function alignedX(align, textX, textW, lineWidth) {
+      if (align === "center") return textX + (textW - lineWidth) / 2;
+      if (align === "right") return textX + textW - lineWidth;
+      return textX;
+    }
+
+    // Sum the width of a series of formatted-text runs at the requested
+    // font size / family. Needed because drawRunLine positions runs
+    // sequentially from a starting x — for aligned headings we need the
+    // total line width up front so we can shift x to match the alignment.
+    function computeRunsWidth(doc, segments, fontSize, fontFamily) {
+      let total = 0;
+      for (const seg of segments) {
+        doc.setFont(fontFamily, pdfStyleFor(seg.style));
+        doc.setFontSize(fontSize);
+        total += doc.getTextWidth(seg.text);
+      }
+      return total;
     }
 
     // =====================================================================
@@ -1701,8 +1749,13 @@
         let isFirstPara = true;
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
-          const para = paragraphs[pi];
+          let para = paragraphs[pi];
           const cls = classifyParagraph(para);
+          // Mirror Pass 2: strip the alignment marker from body paragraphs
+          // so line counting matches the rendered output exactly.
+          if (cls.type === "body" && typeof cls.text === "string") {
+            para = cls.text;
+          }
 
           // First paragraph with drop cap (body only — a heading at the top of
           // a chapter does not get a drop cap).
@@ -1854,10 +1907,14 @@
             continue;
           }
 
-          // Regular body paragraph
+          // Regular body paragraph. When the paragraph is aligned (left /
+          // center / right) it skips justification and the hyphenation-aware
+          // breaker — use doc.splitTextToSize, exactly as Pass 2 does.
           doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
           let bodyLineCount;
-          if (containsFormatting(para)) {
+          if (cls.align) {
+            bodyLineCount = doc.splitTextToSize(para, textW).length;
+          } else if (containsFormatting(para)) {
             const runs = parseInlineRuns(para);
             bodyLineCount = layoutRunsMixed(doc, runs, textW, SPEC.bodySize, BODY_FONT).length;
           } else {
@@ -2086,9 +2143,19 @@
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
           const cls = classifyParagraph(para);
+          // For body paragraphs, use the alignment-marker-stripped text so
+          // the marker (e.g. ":center: ") never leaks into the rendered
+          // output. classifyParagraph already returns cls.text with the
+          // marker removed; other paragraph types (headings, scenebreak,
+          // image, table) read their content from cls.* directly.
+          if (cls.type === "body" && typeof cls.text === "string") {
+            para = cls.text;
+          }
 
           // First paragraph with drop cap (body only — a heading at the top
-          // of a chapter does not get a drop cap).
+          // of a chapter does not get a drop cap). Drop cap ignores
+          // alignment by design — it always uses the default justified
+          // rendering. Per the v0.12.0 spec.
           if (isFirstPara && cls.type === "body" && para.length > 0) {
             const dc = pickDropCap(para);
             if (!dc) {
@@ -2297,17 +2364,66 @@
             doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize); doc.setTextColor(30);
             if (runSubLines) {
               for (const line of runSubLines) {
-                drawRunLine(doc, line, textX, y + subSize * 0.8, subSize, BODY_FONT);
+                // Aligned heading: shift the run group's starting x so the
+                // line is left / centered / right within the text block.
+                let lineStartX = textX;
+                if (cls.align === "center" || cls.align === "right") {
+                  const lineW = computeRunsWidth(doc, line, subSize, BODY_FONT);
+                  lineStartX = alignedX(cls.align, textX, textW, lineW);
+                }
+                drawRunLine(doc, line, lineStartX, y + subSize * 0.8, subSize, BODY_FONT);
                 y += subLineHeight;
               }
             } else {
               for (const sline of plainSubLines) {
-                doc.text(sline, textX, y + subSize * 0.8);
+                if (cls.align === "center") {
+                  doc.text(sline, getCenterX(), y + subSize * 0.8, { align: "center" });
+                } else if (cls.align === "right") {
+                  doc.text(sline, textX + textW, y + subSize * 0.8, { align: "right" });
+                } else {
+                  doc.text(sline, textX, y + subSize * 0.8);
+                }
                 y += subLineHeight;
               }
             }
             y += gapBelow;
             resetBodyFont();
+            continue;
+          }
+
+          // Aligned body paragraph (cls.align is left / center / right).
+          // Aligned text skips justification entirely — ragged on the
+          // non-aligned side, no hyphenation. Mirrors the dry-run logic
+          // in calcBodyPages so the TOC stays accurate.
+          if (cls.align && cls.align !== "left") {
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+            const alignLines = doc.splitTextToSize(para, textW);
+            for (const aline of alignLines) {
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
+              if (cls.align === "center") {
+                doc.text(aline, getCenterX(), y + BASELINE_OFFSET, { align: "center" });
+              } else {
+                doc.text(aline, textX + textW, y + BASELINE_OFFSET, { align: "right" });
+              }
+              y += SPEC.lineHeight;
+            }
+            y += SPEC.paraGap;
+            continue;
+          }
+          // cls.align === "left" — explicit ragged-right body. Fall through
+          // to the formatted/justified branch but force the ragged path by
+          // pretending the paragraph contains formatting (drawRunLine
+          // doesn't justify). Cleaner: use splitTextToSize + left-aligned
+          // doc.text directly.
+          if (cls.align === "left") {
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+            const leftLines = doc.splitTextToSize(para, textW);
+            for (const lline of leftLines) {
+              if (y > maxY) { newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || ""); addPageNumber(bookPageNum + pagesUsed); y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth(); }
+              doc.text(lline, textX, y + BASELINE_OFFSET);
+              y += SPEC.lineHeight;
+            }
+            y += SPEC.paraGap;
             continue;
           }
 
@@ -2640,8 +2756,19 @@
             body += '  <p class="scene-break">* * *</p>\n';
             continue;
           }
-          if (p.startsWith("## ")) body += '  <h2>' + esc(p.slice(3).trim()) + '</h2>\n';
-          else body += '  <p>' + esc(p) + '</p>\n';
+          // Extract per-paragraph alignment override (:left: / :center: /
+          // :right: prefix). If present, the paragraph or heading is
+          // emitted with an inline text-align style that overrides the
+          // default justified body. Default keeps the existing markup
+          // so unaligned chapters look identical to v0.11.9.
+          const alignedPara = parseAlignment(p);
+          const alignAttr = alignedPara.align
+            ? ' style="text-align:' + alignedPara.align + '"'
+            : "";
+          const cleaned = alignedPara.text;
+          if (cleaned.startsWith("## ")) body += '  <h2' + alignAttr + '>' + esc(cleaned.slice(3).trim()) + '</h2>\n';
+          else if (cleaned.startsWith("### ")) body += '  <h3' + alignAttr + '>' + esc(cleaned.slice(4).trim()) + '</h3>\n';
+          else body += '  <p' + alignAttr + '>' + esc(cleaned) + '</p>\n';
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
@@ -2966,6 +3093,41 @@
         });
       };
 
+      // Toggle / replace / remove the alignment prefix on the line under
+      // the cursor. Mirrors toggleLinePrefix's behaviour for `## ` etc.
+      // Markers are :left: / :center: / :right: at the start of the line.
+      // Idempotent: clicking the same alignment twice removes it.
+      const toggleLineAlignPrefix = function(align) {
+        const ta = taRef.current; if (!ta) return;
+        snapshotBeforeEdit();
+        const start = ta.selectionStart;
+        const scrollTop = ta.scrollTop;
+        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+        const lineMatch = value.slice(lineStart).match(/^:(left|center|right):\s*/i);
+        const newPrefix = ":" + align + ": ";
+        let newValue, newPos;
+        if (lineMatch && lineMatch[1].toLowerCase() === align) {
+          // Same alignment → toggle off
+          newValue = value.slice(0, lineStart) + value.slice(lineStart + lineMatch[0].length);
+          newPos = Math.max(lineStart, start - lineMatch[0].length);
+        } else if (lineMatch) {
+          // Different alignment → replace
+          newValue = value.slice(0, lineStart) + newPrefix + value.slice(lineStart + lineMatch[0].length);
+          newPos = start + (newPrefix.length - lineMatch[0].length);
+        } else {
+          // No alignment → insert
+          newValue = value.slice(0, lineStart) + newPrefix + value.slice(lineStart);
+          newPos = start + newPrefix.length;
+        }
+        onChange(newValue);
+        requestAnimationFrame(function() {
+          const t = taRef.current; if (!t) return;
+          t.focus({ preventScroll: true });
+          t.setSelectionRange(newPos, newPos);
+          t.scrollTop = scrollTop;
+        });
+      };
+
       const toggleLinePrefix = function(prefix) {
         const ta = taRef.current; if (!ta) return;
         snapshotBeforeEdit();
@@ -3023,6 +3185,49 @@
             <div style={divider} />
             <button type="button" title="Heading (adds ## to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("## "); }} style={btnStyle}>H2</button>
             <button type="button" title="Subheading (adds ### to current line)" onMouseDown={swallowFocus} onClick={function() { toggleLinePrefix("### "); }} style={btnStyle}>H3</button>
+            <div style={divider} />
+            <button
+              type="button"
+              title="Left-align this paragraph (ragged right). Body text is justified by default — publishing industry standard. Use these to override per paragraph; mainly intended for subheadings."
+              onMouseDown={swallowFocus}
+              onClick={function() { toggleLineAlignPrefix("left"); }}
+              style={Object.assign({}, btnStyle, { padding: "3px 6px" })}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" style={{ display: "block" }}>
+                <line x1="2" y1="3" x2="12" y2="3"/>
+                <line x1="2" y1="6" x2="9" y2="6"/>
+                <line x1="2" y1="9" x2="12" y2="9"/>
+                <line x1="2" y1="12" x2="8" y2="12"/>
+              </svg>
+            </button>
+            <button
+              type="button"
+              title="Center-align this paragraph. Body text is justified by default — publishing industry standard. Use these to override per paragraph; mainly intended for subheadings."
+              onMouseDown={swallowFocus}
+              onClick={function() { toggleLineAlignPrefix("center"); }}
+              style={Object.assign({}, btnStyle, { padding: "3px 6px" })}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" style={{ display: "block" }}>
+                <line x1="2" y1="3" x2="12" y2="3"/>
+                <line x1="4" y1="6" x2="10" y2="6"/>
+                <line x1="2" y1="9" x2="12" y2="9"/>
+                <line x1="3" y1="12" x2="11" y2="12"/>
+              </svg>
+            </button>
+            <button
+              type="button"
+              title="Right-align this paragraph. Body text is justified by default — publishing industry standard. Use these to override per paragraph; mainly intended for subheadings."
+              onMouseDown={swallowFocus}
+              onClick={function() { toggleLineAlignPrefix("right"); }}
+              style={Object.assign({}, btnStyle, { padding: "3px 6px" })}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" style={{ display: "block" }}>
+                <line x1="2" y1="3" x2="12" y2="3"/>
+                <line x1="5" y1="6" x2="12" y2="6"/>
+                <line x1="2" y1="9" x2="12" y2="9"/>
+                <line x1="6" y1="12" x2="12" y2="12"/>
+              </svg>
+            </button>
             {onImageUpload && <div style={divider} />}
             {onImageUpload && (
               <button
@@ -3068,7 +3273,7 @@
               + Table
             </button>
             <div style={{ flex: 1 }} />
-            <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4 }}>**bold** *italic* __underline__ ## heading</span>
+            <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4, lineHeight: 1.3, textAlign: "right" }}>**bold** *italic* ## heading<br/>body default: justified</span>
           </div>
           <textarea ref={taRef} value={value} onChange={handleTextareaChange} onKeyDown={handleTextareaKeyDown} onPaste={normalizePasteIntoTextarea} rows={rows}
             style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
