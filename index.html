@@ -132,7 +132,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.0",
+      version: "0.11.1",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -296,12 +296,65 @@
     //     is followed by a capital-letter (or opening-quote) start.
     //   Otherwise: no sentence punctuation anywhere -> short-line structured
     //     content. Leave the input alone.
+    // Detect a tab-separated tabular paste (Word table, Excel selection,
+    // Google Sheets selection) and convert it to markdown table syntax.
+    // Returns the markdown string when conversion is confident; returns
+    // null otherwise so the caller can fall back to prose handling.
+    //
+    // Confidence rules (all must hold):
+    //   - At least 2 non-empty lines
+    //   - Every non-empty line contains at least one tab
+    //   - Every line has the same tab count (= consistent column count)
+    //   - No blank lines in the middle (would suggest mixed content)
+    //   - At least 2 columns
+    //   - Not already in markdown table form (first line starts with "|")
+    //
+    // Cell content with a literal "|" is escaped as "\|" so it doesn't
+    // confuse the markdown table parser. Cells with embedded newlines
+    // (rare) fall through this detector and paste as raw text.
+    function tryConvertTabularToMarkdown(text) {
+      if (!text) return null;
+      const lines = String(text).split("\n");
+      while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+      if (lines.length < 2) return null;
+      if (/^\s*\|/.test(lines[0])) return null; // already markdown-style
+      let columnCount = -1;
+      for (const line of lines) {
+        if (line.trim() === "") return null;
+        const tabs = (line.match(/\t/g) || []).length;
+        if (tabs === 0) return null;
+        const cols = tabs + 1;
+        if (columnCount === -1) columnCount = cols;
+        else if (cols !== columnCount) return null;
+      }
+      if (columnCount < 2) return null;
+
+      function splitCells(line) {
+        return line.split("\t").map(function(c) { return c.replace(/\|/g, "\\|").trim(); });
+      }
+      const headers = splitCells(lines[0]);
+      const out = [];
+      out.push("| " + headers.join(" | ") + " |");
+      out.push("|" + headers.map(function() { return "----------"; }).join("|") + "|");
+      for (let i = 1; i < lines.length; i++) {
+        out.push("| " + splitCells(lines[i]).join(" | ") + " |");
+      }
+      return out.join("\n");
+    }
+
     function normalizeLineEndings(text) {
       let result = String(text == null ? "" : text)
         .replace(/\r\n/g, "\n")
         .replace(/\r/g, "\n")
         .replace(/\u2028/g, "\n")
         .replace(/\u2029/g, "\n\n");
+
+      // Word / Excel / Google Sheets put plain-text tables on the clipboard
+      // as tab-separated cells with newline-separated rows. If we can clearly
+      // identify that pattern, convert to markdown table syntax so the body
+      // parser recognizes it and renders a real table.
+      const tableMd = tryConvertTabularToMarkdown(result);
+      if (tableMd) return tableMd;
 
       // Bail out: already has paragraph breaks, or no breaks at all.
       if (result.indexOf("\n\n") !== -1) return result;
