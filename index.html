@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.8",
+      version: "0.11.9",
       date: "2026-05-12",
       changes: [
+        "0.11.9 - Two toolbar polish fixes. (1) Undo icon swapped from ↶ (a weak hook glyph that rendered as a tiny squiggle on most systems) to ↺ (anticlockwise open circle arrow) — the standard undo glyph in macOS / Word / Docs. Bumped the icon's font-size up a hair so it visually matches B/I/U weight. (2) Toolbar buttons no longer wrap their label across two lines when the toolbar is tight. Added whiteSpace:nowrap and flexShrink:0 to btnStyle, so '+ Image' and '+ Table' stay as a single line regardless of toolbar width.",
         "0.11.8 - Undo button in the chapter body editor. The toolbar in Step 3 now has an Undo (↶) button at the leftmost position; Cmd+Z (Mac) / Ctrl+Z (Win/Linux) also triggers undo. Each RichTextInput keeps its own undo stack (capped at 100 entries) — snapshots are pushed before any toolbar action (B/I/U, H2/H3, image insert, table insert) and at the start of each typing burst (with a 700ms idle commit). Switching chapters mounts a fresh editor with an empty stack so there's no cross-chapter bleed. The button auto-disables when there's nothing to undo. Replaces the browser's native undo, which was unreliable because the textarea is React-controlled (programmatic edits bypassed the browser's stack and some browsers cleared it whenever the value prop changed).",
         "0.11.7 - Three fixes. (1) Scene-break ornament now stays visually centered on every page, not just the first page of a chapter. Root cause: the chapter render loop captured textX once at chapter open (recto position, x=66) and reused it on every subsequent page — so when body wrapped to a verso the text block stayed at the recto x while getCenterX() correctly shifted to the verso center, making the centered \"* * *\" appear off-center relative to the body text around it. Fix: textX and textW are now `let` and re-captured after every newPage() call inside the chapter loop, so the mirrored verso/recto margins are honoured on every page. (2) The Step 1 body-text-size description now reads \"Choose between default and spacious settings\" — removed the project-specific reference. (3) Reaffirms v0.11.6: TOC entry font already follows the body-size preset selector (10pt default / 11pt spacious), via tocEntrySize = SPEC.bodySize.",
         "0.11.6 - Scene-break robustness + TOC typography. (1) Scene breaks (\"* * *\", \"***\", \"---\", etc.) now get promoted to their own paragraph even when the paste only has single newlines around them — previously a paste from Word / Docs / Pages that did not preserve a full blank line between prose and the break let the asterisks fall back into the surrounding body, where the inline-run parser interpreted them as italic markers and produced a stray single star. New helper splitChapterBody() runs at the top of pass 1, pass 2, and the EPUB chapter loop; it splits on blank lines as before, then walks each chunk and promotes any line that matches isSectionBreak. Expanded the ornament regex to include the unicode asterisk variants Word / Pages / InDesign sometimes substitute (∗ ⁎ ⋆ ✱ ✦ ❋ ※ ⁂ ‧) and to accept a single ornament character alone on a line (e.g. just \"*\"). (2) TOC typography brought into line with trade-book convention used by Penguin, Random House, O'Reilly: \"Contents\" heading drops from 22pt to 18pt so it no longer competes with the 20pt chapter titles; entries drop from a hardcoded 11pt to SPEC.bodySize (so 10pt in default preset, 11pt in spacious) so the rhythm matches the body; row spacing tightens from a flat 30pt to 2x line-height. Result reads as a reference page, not a display page.",
@@ -3000,7 +3001,7 @@
       // focused throughout the click and avoids the visible scroll jump.
       const swallowFocus = function(e) { e.preventDefault(); };
 
-      const btnStyle = { padding: "4px 10px", fontSize: 12, fontFamily: FONT, fontWeight: 600, background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border, borderRadius: 6, cursor: "pointer", minWidth: 28, lineHeight: 1.2 };
+      const btnStyle = { padding: "4px 10px", fontSize: 12, fontFamily: FONT, fontWeight: 600, background: BRAND.white, color: BRAND.textSecondary, border: "1px solid " + BRAND.border, borderRadius: 6, cursor: "pointer", minWidth: 28, lineHeight: 1.2, whiteSpace: "nowrap", flexShrink: 0 };
       const divider = { width: 1, alignSelf: "stretch", background: BRAND.border, margin: "0 4px" };
 
       return (
@@ -3013,8 +3014,8 @@
               onMouseDown={swallowFocus}
               onClick={performUndo}
               disabled={!canUndo}
-              style={Object.assign({}, btnStyle, { opacity: canUndo ? 1 : 0.4, cursor: canUndo ? "pointer" : "default" })}
-            >{"↶"}</button>
+              style={Object.assign({}, btnStyle, { opacity: canUndo ? 1 : 0.4, cursor: canUndo ? "pointer" : "default", fontSize: 14 })}
+            >{"↺"}</button>
             <div style={divider} />
             <button type="button" title="Bold (wraps selection in **)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("**", "**"); }} style={Object.assign({}, btnStyle, { fontWeight: 800 })}>B</button>
             <button type="button" title="Italic (wraps selection in *)" onMouseDown={swallowFocus} onClick={function() { wrapSelection("*", "*"); }} style={Object.assign({}, btnStyle, { fontStyle: "italic" })}>I</button>
