@@ -132,7 +132,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.1",
+      version: "0.11.2",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -620,6 +620,13 @@
       (table.alignments || []).forEach(function(a, i) {
         columnStyles[i] = { halign: a };
       });
+      // Trade-book table typography (per Bringhurst): table text sits 1-2pt
+      // smaller than body type so the denser data has the same visual
+      // "weight per unit area" as surrounding prose. We use 90% of body.
+      // Horizontal padding is larger than vertical so cells look airy.
+      // Header row is bolded, light-gray filled, and slightly more padded
+      // than body cells to read as a header.
+      const tableFontSize = SPEC.bodySize * 0.9;
       return {
         startY: startY,
         head: [table.headers],
@@ -629,11 +636,11 @@
         columnStyles: columnStyles,
         styles: {
           font: "helvetica", // overridden in pass 2 once fonts are loaded
-          fontSize: SPEC.bodySize,
-          cellPadding: 4,
+          fontSize: tableFontSize,
+          cellPadding: { top: 5, right: 7, bottom: 5, left: 7 },
           textColor: [30, 30, 30],
-          lineColor: [180, 180, 180],
-          lineWidth: 0.4,
+          lineColor: [210, 210, 210],
+          lineWidth: 0.25,
           overflow: "linebreak",
           valign: "top",
         },
@@ -641,7 +648,8 @@
           fillColor: [240, 240, 240],
           textColor: [30, 30, 30],
           fontStyle: "bold",
-          lineColor: [120, 120, 120],
+          cellPadding: { top: 6, right: 7, bottom: 6, left: 7 },
+          lineColor: [140, 140, 140],
           lineWidth: 0.5,
         },
         alternateRowStyles: { fillColor: [250, 250, 250] },
@@ -2340,9 +2348,11 @@
         'p.figure { text-align: center; margin: 1.5em 0; }',
         'p.figure img { max-width: 100%; height: auto; }',
         // Markdown tables — reflowable, accessible, native to the EPUB reader.
-        'table.md-table { border-collapse: collapse; margin: 1.5em 0; width: 100%; font-size: 0.95em; }',
-        'table.md-table th, table.md-table td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }',
-        'table.md-table th { background: #eee; font-weight: bold; text-align: left; }',
+        // Trade-book convention: table text 90% of body, more horizontal
+        // padding than vertical, header slightly more padded.
+        'table.md-table { border-collapse: collapse; margin: 1.5em 0; width: 100%; font-size: 0.9em; }',
+        'table.md-table td { border: 0.5px solid #d0d0d0; padding: 5px 7px; vertical-align: top; }',
+        'table.md-table th { border: 1px solid #8c8c8c; background: #f0f0f0; font-weight: bold; text-align: left; padding: 6px 7px; vertical-align: top; }',
         'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
