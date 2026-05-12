@@ -131,7 +131,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.10.2",
+      version: "0.10.3",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -461,6 +461,35 @@
       });
     }
 
+    // Build the visible body marker for an inserted image. Format:
+    //   📷 filename — img-id
+    // Reads in English (camera icon, the filename, an em-dash, the id) so it
+    // looks like a designed placeholder rather than the code-y ![alt](id)
+    // markdown the v0.10.x series used. Backward-compatibility for the older
+    // markdown-style marker lives in parseImageMarker() below.
+    function formatImageMarker(filenameOrAlt, imageId) {
+      const label = String(filenameOrAlt || "image").trim() || "image";
+      return "📷 " + label + " — " + imageId;
+    }
+
+    // Try to recognize either marker form a paragraph might be:
+    //   - new (v0.10.3+): 📷 filename — img-xxxx
+    //   - old (v0.10.x ): ![alt](img-xxxx)
+    // Returns { imageId, alt } or null. alt falls back to the filename / alt
+    // text the marker originally carried, used as the <img alt> in the EPUB.
+    function parseImageMarker(paragraph) {
+      const p = String(paragraph || "").trim();
+      // New form (em-dash separator is U+2014). The filename is non-greedy
+      // so a filename containing the em-dash still parses cleanly because
+      // the id at the end is anchored to $.
+      let m = p.match(/^📷\s+(.+?)\s+—\s+(img-[a-zA-Z0-9]+)$/);
+      if (m) return { alt: m[1].replace(/\.[^.]+$/, ""), imageId: m[2] };
+      // Old form
+      m = p.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if (m) return { alt: m[1], imageId: m[2] };
+      return null;
+    }
+
     // Per-letter drop cap tuck-in. Expressed as a fraction of the letter's own rendered
     // width. ALL VALUES ARE ZERO. The previous tuck table tried to pull body text into
     // letters with empty space on the right (L, T, F, P, Y, etc.) but this caused
@@ -730,12 +759,13 @@
     function classifyParagraph(p) {
       if (/^###\s+/.test(p)) return { type: "h3", text: p.replace(/^###\s+/, "") };
       if (/^##\s+/.test(p)) return { type: "h2", text: p.replace(/^##\s+/, "") };
-      // Image marker as a whole paragraph: ![alt text](img-id)
-      // The marker is recognized only when it occupies the entire paragraph
-      // (after whitespace collapse) so inline accidental markers within prose
-      // do not turn into floating images.
-      const imgMatch = p.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if (imgMatch) return { type: "image", alt: imgMatch[1], imageId: imgMatch[2] };
+      // Image marker as a whole paragraph. Recognized in either the new
+      // (📷 filename — img-id) or legacy (![alt](img-id)) form via the
+      // parseImageMarker() helper. Only matches when the marker occupies
+      // the entire paragraph after whitespace collapse, so accidental
+      // inline markers in prose don't turn into floating images.
+      const img = parseImageMarker(p);
+      if (img) return { type: "image", alt: img.alt, imageId: img.imageId };
       return { type: "body", text: p };
     }
 
@@ -2161,13 +2191,14 @@
         }
         const paragraphs = (ch.body || "").split(/\n\s*\n/).map(function(p) { return p.replace(/\n/g, " ").trim(); }).filter(function(p) { return p; });
         for (const p of paragraphs) {
-          // Image marker as a whole paragraph: ![alt](img-id) — emit an <img> tag
-          // inside a centered <p>, and queue the image bytes for packaging
-          // into OEBPS/images/.
-          const imgMatch = p.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+          // Image marker as a whole paragraph (either the new
+          // 📷 filename — img-id form or the legacy ![alt](img-id) form).
+          // Emit an <img> tag inside a centered <p> and queue the image
+          // bytes for packaging into OEBPS/images/.
+          const imgMatch = parseImageMarker(p);
           if (imgMatch) {
-            const alt = imgMatch[1];
-            const id = imgMatch[2];
+            const alt = imgMatch.alt;
+            const id = imgMatch.imageId;
             const img = ch.images && ch.images[id];
             if (img && img.dataUrl) {
               const fmt = getImageFormatFromDataUrl(img.dataUrl);
@@ -2371,8 +2402,8 @@
         setImageBusy(true);
         Promise.resolve(onImageUpload(file)).then(function(meta) {
           if (!meta || !meta.id) return;
-          const alt = meta.alt || "";
-          insertBlockAtCursor("![" + alt + "](" + meta.id + ")");
+          const label = meta.filename || meta.alt || "image";
+          insertBlockAtCursor(formatImageMarker(label, meta.id));
         }).catch(function(e) {
           console.warn("Image upload failed:", e);
         }).then(function() {
@@ -2503,20 +2534,21 @@
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
             {ids.map(function(id) {
               const img = images[id];
-              const altDefault = (img && img.filename ? img.filename : id).replace(/\.[^.]+$/, "");
+              const label = (img && img.filename) ? img.filename : id;
+              const marker = formatImageMarker(label, id);
               return (
                 <div key={id} style={cardStyle}>
                   <div style={thumbStyle}>
                     <img src={img && img.dataUrl} alt={img && img.filename || ""} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }} />
                   </div>
-                  <div style={{ color: BRAND.textPrimary, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }} title={img && img.filename || ""}>
-                    {img && img.filename ? img.filename : id}
+                  <div style={{ color: BRAND.textPrimary, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }} title={label}>
+                    {label}
                   </div>
-                  <div style={markerStyle} title={"![" + altDefault + "](" + id + ")"}>
-                    {"![" + altDefault + "](" + id + ")"}
+                  <div style={markerStyle} title={marker}>
+                    {marker}
                   </div>
                   <div style={{ display: "flex", gap: 4 }}>
-                    <button type="button" onClick={function() { onReinsert(id, altDefault); }} style={reinsertBtn}>Re-insert</button>
+                    <button type="button" onClick={function() { onReinsert(id, label); }} style={reinsertBtn}>Re-insert</button>
                     <button type="button" onClick={function() { onRemove(id); }} style={removeBtn} title="Remove this image AND any markers referencing it from the body text">Remove</button>
                   </div>
                 </div>
@@ -2647,29 +2679,31 @@
                     },
                   });
                   onEdit(chapter.id, "images", newImages);
-                  return { id: id, alt: altDefault };
+                  return { id: id, alt: altDefault, filename: file.name || "" };
                 }}
               />
 
               <ImageGallery
                 chapter={chapter}
-                onReinsert={function(id, alt) {
+                onReinsert={function(id, label) {
                   if (richTextRef.current && richTextRef.current.insertAtCursor) {
-                    richTextRef.current.insertAtCursor("![" + alt + "](" + id + ")");
+                    richTextRef.current.insertAtCursor(formatImageMarker(label, id));
                   }
                 }}
                 onRemove={function(id) {
                   // Drop the image from the chapter's image map and strip
-                  // every marker that references it from the body text.
-                  // (Leaving stale markers would render as "[missing
-                  // image: id]" placeholders in the PDF, which is worse.)
+                  // every marker that references it from the body text
+                  // (both the new "📷 filename — img-id" form AND the legacy
+                  // "![alt](img-id)" form). Otherwise stale markers would
+                  // render as "[missing image: id]" placeholders later.
                   const newImages = Object.assign({}, chapter.images || {});
                   delete newImages[id];
                   onEdit(chapter.id, "images", newImages);
                   const escapedId = String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                  const pattern = new RegExp("\\n*!\\[[^\\]]*\\]\\(" + escapedId + "\\)\\n*", "g");
+                  const newForm = new RegExp("\\n*📷[^\\n]+\\s—\\s" + escapedId + "(?=\\s|$)\\n*", "g");
+                  const oldForm = new RegExp("\\n*!\\[[^\\]]*\\]\\(" + escapedId + "\\)\\n*", "g");
                   const oldBody = chapter.body || "";
-                  const newBody = oldBody.replace(pattern, "\n\n").replace(/\n{3,}/g, "\n\n");
+                  const newBody = oldBody.replace(newForm, "\n\n").replace(oldForm, "\n\n").replace(/\n{3,}/g, "\n\n");
                   if (newBody !== oldBody) {
                     onEdit(chapter.id, "body", newBody);
                   }
