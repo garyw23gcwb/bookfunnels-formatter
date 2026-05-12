@@ -132,7 +132,7 @@
     };
 
     const APP_VERSION = {
-      version: "0.11.2",
+      version: "0.11.3",
       date: "2026-05-12",
       changes: [
         "0.9.4 - Defensive paste handler on all three editable textareas (manuscript paste box, dedication / multiline Input, and the RichTextInput chapter body). Different source applications encode paragraph breaks differently on the clipboard, and some browsers don't reliably normalize them when pasting into a textarea. The new handler reads the plain-text clipboard payload, normalizes every common encoding to \\n / \\n\\n (\\r\\n from Windows / Word, \\r from legacy Mac, U+2028 line separator from rich text editors, U+2029 paragraph separator from Word / Google Docs), and inserts at the current cursor position. Fires a real input event afterwards so React state updates correctly. Won't help with sources that genuinely lack line breaks (selecting text from a PDF often flattens paragraphs to a single line) but fixes every case where the break is encoded in any common form.",
@@ -3163,6 +3163,34 @@
         setStep(0);
       };
 
+      // Reset every form field and the autosave so the user can start a
+      // fresh book without remnants of the previous one. Confirmed because
+      // it wipes work that may not be backed up anywhere else.
+      const handleClearAll = function() {
+        const hasContent = (
+          rawText.trim().length > 0 ||
+          chapters.length > 0 ||
+          bookData.title.trim().length > 0 ||
+          bookData.author.trim().length > 0 ||
+          bookData.subtitle.trim().length > 0 ||
+          (bookData.dedication || "").trim().length > 0
+        );
+        if (hasContent) {
+          const ok = window.confirm("Clear all content?\n\nThis removes the current book's title, manuscript, chapters, dedication, CTA, and any uploaded images. The autosaved copy in this browser is also deleted.\n\nThere is no undo. Continue?");
+          if (!ok) return;
+        }
+        setBookData({ title: "", subtitle: "", author: "", publisher: "", isbn: "", dedication: "", copyrightText: "", ctaTitle: "", ctaBody: "", ctaUrl: "" });
+        setRawText("");
+        setChapters([]);
+        setStep(0);
+        setPdfUrl(null);
+        setEpubUrl(null);
+        setError("");
+        setProgress("");
+        setTextSizePreset('default');
+        try { localStorage.removeItem(AUTOSAVE_KEY); } catch (e) {}
+      };
+
       const updateBook = function(field, value) { setBookData(function(prev) { return Object.assign({}, prev, { [field]: value }); }); };
       const handleDetectChapters = function() {
         console.log('=== Chapter Detection Debug ===');
@@ -3342,9 +3370,14 @@
 
       return (
         <div style={{ minHeight: "100vh", background: BRAND.bgPage, color: BRAND.textPrimary, fontFamily: FONT }}>
-          {/* Top utility bar - version + sample data */}
+          {/* Top utility bar - version + sample data + clear */}
           <div style={{ position: "absolute", top: 16, right: 20, display: "flex", alignItems: "center", gap: 10, zIndex: 10 }}>
             <button onClick={loadSampleData} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textSecondary, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}>Load Sample Data</button>
+            <button
+              onClick={handleClearAll}
+              title="Reset the formatter to a blank state. Removes the current book's content and the autosaved copy in this browser. Use this when starting a new book."
+              style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.danger, cursor: "pointer", fontSize: 11, fontFamily: FONT, fontWeight: 500 }}
+            >Clear Content</button>
             <button onClick={function() { setShowChangelog(!showChangelog); }} style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid " + BRAND.border, background: BRAND.white, color: BRAND.textMuted, cursor: "pointer", fontSize: 10, fontFamily: FONT, fontWeight: 600 }}>v{APP_VERSION.version}</button>
           </div>
 
