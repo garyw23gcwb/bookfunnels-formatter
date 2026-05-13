@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.4",
+      version: "0.12.5",
       date: "2026-05-13",
       changes: [
+        "0.12.5 - Reader Bonus form UX rework so the URL bar never silently keeps stale sample data. Three changes to the Step 1 Reader Bonus panel: (1) New introductory hint at the top of the panel explicitly states the body and URL fields do NOT auto-detect each other. (2) Each input label now describes WHERE that field renders on the page: title → headline at the top, description → body text below the headline (with explicit 'do not put your URL here' warning), URL → black bar at the bottom. (3) A live preview of the black-bar URL appears immediately below the CTA URL field — same dark background, same typography — so the user can SEE what is about to render before generating. This prevents the very common failure mode where a user loads sample data, edits the title and body, and ships a book whose black bar still shows the sample URL. No renderer change — the PDF / EPUB output is unchanged; only the form UX is updated.",
         "0.12.4 - Reader Bonus / lead capture page typography matched to the rest of the book. Previously the CTA title rendered at a fixed 22pt and the CTA body at 12pt — both larger than anything else inside the book. New values: title = SPEC.bodySize + 3 (matches an H2 headline), body = SPEC.bodySize (matches a body paragraph). Title line height moves to size × 1.35 (same multiplier the chapter headings use). Both scale with the body-size preset, so Default (10/15) and Spacious (11/16.5) each get a CTA page that reads as part of the same typographic system. EPUB CSS updated to match: cta-title 1.25em (h2 size), cta-body 1em (body size). URL bar and READER BONUS header bar untouched — those are deliberate display elements and stay visually distinct.",
         "0.12.3 - Load Sample Data now spawns a NEW project instead of overwriting the active one. Previously the button called setBookData / setRawText / setChapters([]) directly, blowing away whatever was in the current project. Now it follows the same pattern as the '+ New Project' entry in the picker — snapshot the current project, create a fresh slot populated with the sample payload, switch to it. The picker will show both your in-progress project AND the new 'Get Big Clients With Tiny Books' sample side by side; switching back returns you to your work untouched. Sample data extracted into module-level SAMPLE_BOOK_DATA / SAMPLE_RAW_TEXT constants so the payload lives separate from the handler.",
         "0.12.2 - Critical fix: chapter edits no longer get wiped when re-navigating through Step 2. Bug: the 'Detect Chapters →' button on Step 2 always re-ran detection from rawText and called setChapters(detected), overwriting any edits the user had made on Step 3. So the flow Step 3 → Back to Step 1 → forward through Step 2 → Step 3 silently lost every formatting / alignment / bold / italic / heading change. Fix: when chapters already exist, the Step 2 forward button just advances (no re-detection) and its label changes to 'Next: Edit Chapters →' to make this explicit. Re-detection from rawText is now only available via an explicit 'Re-detect chapters' link, which asks for confirmation before replacing the existing chapter list. Refactored the detection logic out of handleDetectChapters into a runChapterDetection helper so both the first-time-detect path and the explicit re-detect path stay in lockstep.",
@@ -4251,10 +4252,20 @@
                 </div>
                 <Input label="Dedication" value={bookData.dedication} onChange={function(v) { updateBook("dedication", v); }} multiline={true} rows={4} placeholder="To my wife Sammi..." />
                 <div style={{ marginTop: 8, padding: 16, background: BRAND.light, borderRadius: 10, border: "1px solid " + BRAND.border }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: BRAND.navy, fontFamily: FONT }}>Reader Bonus Page (Optional)</div>
-                  <Input label="CTA Title" value={bookData.ctaTitle} onChange={function(v) { updateBook("ctaTitle", v); }} placeholder="Join The 48-Hour Tinybook Challenge" />
-                  <Input label="CTA Description" value={bookData.ctaBody} onChange={function(v) { updateBook("ctaBody", v); }} multiline={true} rows={3} placeholder="Finally, quickly and easily create your first Tinybook..." />
-                  <Input label="CTA URL" value={bookData.ctaUrl} onChange={function(v) { updateBook("ctaUrl", v); }} placeholder="GetClientsWithBooks.com/Challenge" />
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4, color: BRAND.navy, fontFamily: FONT }}>Reader Bonus Page (Optional)</div>
+                  <div style={{ fontSize: 11, color: BRAND.textMuted, marginBottom: 14, fontFamily: FONT, lineHeight: 1.5 }}>
+                    Three separate fields that each render in a specific place on the Reader Bonus page. Filling them all in below is the only way to update the page — the body and URL do not auto-detect each other.
+                  </div>
+                  <Input label="CTA Title — headline at the top of the Reader Bonus page" value={bookData.ctaTitle} onChange={function(v) { updateBook("ctaTitle", v); }} placeholder="Join The 48-Hour Tinybook Challenge" />
+                  <Input label="CTA Description — body text below the headline (do not put your URL here)" value={bookData.ctaBody} onChange={function(v) { updateBook("ctaBody", v); }} multiline={true} rows={3} placeholder="Finally, quickly and easily create your first Tinybook..." />
+                  <Input label="CTA URL — renders in the black bar at the bottom of the page" value={bookData.ctaUrl} onChange={function(v) { updateBook("ctaUrl", v); }} placeholder="GetClientsWithBooks.com/Challenge" />
+                  {/* Mini visual preview of the black-bar URL so the user immediately sees what's about to render. Updates live as they type. */}
+                  <div style={{ marginTop: -8, marginBottom: 4, padding: "9px 14px", background: "#1e1e1e", color: "#ffffff", borderRadius: 6, fontSize: 12, fontFamily: "'Gelasio', Georgia, serif", textAlign: "center", letterSpacing: "0.02em", border: "1px solid #1e1e1e", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {bookData.ctaUrl
+                      ? bookData.ctaUrl
+                      : <span style={{ color: "#888", fontStyle: "italic" }}>(no URL set — black bar will be hidden)</span>}
+                  </div>
+                  <div style={{ fontSize: 10, color: BRAND.textMuted, marginBottom: 4, fontFamily: FONT, textAlign: "center" }}>↑ live preview of the URL bar</div>
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
                   <Button onClick={function() { setStep(1); }} disabled={!bookData.title || !bookData.author}>Next: Add Manuscript &rarr;</Button>
