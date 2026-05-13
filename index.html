@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.3",
-      date: "2026-05-12",
+      version: "0.12.4",
+      date: "2026-05-13",
       changes: [
+        "0.12.4 - Reader Bonus / lead capture page typography matched to the rest of the book. Previously the CTA title rendered at a fixed 22pt and the CTA body at 12pt — both larger than anything else inside the book. New values: title = SPEC.bodySize + 3 (matches an H2 headline), body = SPEC.bodySize (matches a body paragraph). Title line height moves to size × 1.35 (same multiplier the chapter headings use). Both scale with the body-size preset, so Default (10/15) and Spacious (11/16.5) each get a CTA page that reads as part of the same typographic system. EPUB CSS updated to match: cta-title 1.25em (h2 size), cta-body 1em (body size). URL bar and READER BONUS header bar untouched — those are deliberate display elements and stay visually distinct.",
         "0.12.3 - Load Sample Data now spawns a NEW project instead of overwriting the active one. Previously the button called setBookData / setRawText / setChapters([]) directly, blowing away whatever was in the current project. Now it follows the same pattern as the '+ New Project' entry in the picker — snapshot the current project, create a fresh slot populated with the sample payload, switch to it. The picker will show both your in-progress project AND the new 'Get Big Clients With Tiny Books' sample side by side; switching back returns you to your work untouched. Sample data extracted into module-level SAMPLE_BOOK_DATA / SAMPLE_RAW_TEXT constants so the payload lives separate from the handler.",
         "0.12.2 - Critical fix: chapter edits no longer get wiped when re-navigating through Step 2. Bug: the 'Detect Chapters →' button on Step 2 always re-ran detection from rawText and called setChapters(detected), overwriting any edits the user had made on Step 3. So the flow Step 3 → Back to Step 1 → forward through Step 2 → Step 3 silently lost every formatting / alignment / bold / italic / heading change. Fix: when chapters already exist, the Step 2 forward button just advances (no re-detection) and its label changes to 'Next: Edit Chapters →' to make this explicit. Re-detection from rawText is now only available via an explicit 'Re-detect chapters' link, which asks for confirmation before replacing the existing chapter list. Refactored the detection logic out of handleDetectChapters into a runChapterDetection helper so both the first-time-detect path and the explicit re-detect path stay in lockstep.",
         "0.12.1 - H2 / H3 heading spacing brought into line with industry convention. Previous values (hardcoded gapAbove ≈ 10pt, gapBelow = 4pt for H2; 7.5pt / 3pt for H3) produced a roughly 5:1 visible above-to-below ratio — too lopsided. Penguin / Random House / Chicago Manual all target ~2:1. New values express gaps as a fraction of body lineHeight so the rhythm scales with the body-size preset: H2 gapAbove = 0.65 × lineHeight, gapBelow = 0.55 × lineHeight; H3 = 0.5 × / 0.4 × respectively. Combined with the trailing paraGap from the previous paragraph, that lands the visible above-to-below ratio at ~2:1 for both default and spacious presets. Two-pass logic kept in lockstep so TOC page numbers stay accurate.",
@@ -1580,13 +1581,18 @@
         const textW = getTextWidth();
         const centerX = textX + textW / 2;
 
-        // Layout constants
+        // Layout constants.
+        // Title and body fonts deliberately MATCH the rest of the book —
+        // title = H2 headline size (bodySize + 3), body = body paragraph
+        // size — so the CTA page reads as part of the same typographic
+        // system as the chapters. Both scale with the body-size preset
+        // (Default 10/15 vs Spacious 11/16.5).
         const HEADER_BAR_H = 40;
         const URL_BAR_H = 40;
-        const TITLE_SIZE = 22;
-        const TITLE_LINE_H = 28;   // baseline-to-baseline within title
-        const BODY_SIZE = 12;
-        const BODY_LINE_H = 16;    // baseline-to-baseline within body
+        const TITLE_SIZE = SPEC.bodySize + 3;
+        const TITLE_LINE_H = TITLE_SIZE * 1.35;   // baseline-to-baseline within title
+        const BODY_SIZE = SPEC.bodySize;
+        const BODY_LINE_H = SPEC.lineHeight;      // baseline-to-baseline within body
 
         // VISUAL gaps. Each is measured edge-to-edge of the visible text,
         // not baseline-to-baseline, so the rendered output matches the number.
@@ -2619,8 +2625,10 @@
         'div.title-page .author { font-weight: bold; margin-top: 3em; letter-spacing: 0.1em; text-transform: uppercase; }',
         'div.cta-page { text-align: center; margin: 3em 0; page-break-before: always; break-before: page; }',
         'div.cta-page .cta-banner { background: #111; color: #fff; padding: 0.8em; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 2em; }',
-        'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; }',
-        'div.cta-page .cta-body { font-size: 1.05em; margin: 2em 10%; }',
+        // CTA title sized at h2 (1.25em) and body at 1em so the lead-capture
+        // page matches the typographic system used by the rest of the book.
+        'div.cta-page .cta-title { font-size: 1.25em; font-weight: bold; margin: 1em 0; }',
+        'div.cta-page .cta-body { font-size: 1em; margin: 2em 10%; }',
         'div.cta-page .cta-url { background: #111; color: #fff; padding: 0.8em; margin: 2em 0; font-weight: bold; word-break: break-all; }',
       ].join("\n");
 
