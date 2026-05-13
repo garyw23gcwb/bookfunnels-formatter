@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.0",
+      version: "0.13.1",
       date: "2026-05-13",
       changes: [
+        "0.13.1 - Reader Bonus body text bumped from SPEC.bodySize to SPEC.bodySize + 2 (Default 10pt body → 12pt CTA body; Spacious 11pt → 13pt). The CTA body is short marketing-style copy on a destination page, not running narrative, so it benefits from a bit more presence than the chapter body — easier to scan from across the room. Line-height keeps the same ratio to font size that the chapter body uses, so the rhythm stays consistent. EPUB cta-body lifted from 1em to 1.2em to match.",
         "0.13.0 - Paste from Word / Google Docs / Pages / Apple Notes / browsers now PRESERVES bold, italic, underline, and headings. Previously the paste handler only read text/plain from the clipboard, which strips all formatting; users had to re-mark every italicised passage by hand after paste. New helper htmlToMarkdownLite() reads the clipboard's text/html payload (every major editor puts one there), walks the DOM, and converts: <strong>/<b>/font-weight:bold→**bold**; <em>/<i>/font-style:italic→*italic*; <u>/text-decoration:underline→__underline__; <h1>→bare title (so chapter detection picks it up); <h2>→## subhead; <h3..h6>→### subhead; <p>/<div>→paragraph break; <br>→line break. Google Docs-style <b style=\"font-weight:normal\"> wrappers are correctly treated as NOT bold (Docs uses these for typesetting, not emphasis). Nested same-style elements aren't double-wrapped; whitespace inside formatted runs is moved OUTSIDE the markers so the renderer's inline parser matches correctly. Applied to the Step 3 chapter body editor AND the Step 2 manuscript paste box. Other fields (Dedication, CTA Description) continue to use the plain-text-only paste handler because they render their value verbatim and would show literal asterisks if markers leaked in.",
         "0.12.9 - Chapter reordering on Step 3. Each ChapterCard now has up (↑) and down (↓) arrow buttons in the header row alongside Edit and Remove. Click them to swap a chapter with its neighbour. Up is auto-disabled on the first chapter, Down on the last. The change flows through the same setChapters → autosave → render pipeline as any other chapter edit, so the final PDF and EPUB pick up the new order automatically — TOC entries reorder, chapter numbering (if you have explicit 'Chapter N' labels you may want to update them yourself), and page numbers all reflect the new sequence. No drag-and-drop library — buttons keep the UI keyboard-accessible and behave the same on mobile and desktop.",
         "0.12.8 - Back-matter chapters no longer get a drop cap on their first paragraph. Chapters flagged `includeInToc: false` — typically About the Author, Acknowledgments, also any user-marked back matter — now render their opening paragraph as normal justified body text instead of with the chapter-opener drop cap. Trade-book convention: drop caps belong to narrative chapter openers, not to biographical or legal end-pages. Implementation gates the drop-cap branch in both PDF passes on `ch.includeInToc !== false`, so the dry-run page count and the actual render stay in lockstep. Front matter and regular chapters are unchanged. No new UI — the existing 'Include in Table of Contents' checkbox on each chapter card now controls drop cap too (back matter doesn't appear in the TOC AND doesn't get a chapter-opener decoration — one flag, consistent meaning).",
@@ -1744,18 +1745,22 @@
         const centerX = textX + textW / 2;
 
         // Layout constants.
-        // Title sized to MATCH the chapter title (SPEC.chapterTitleSize)
-        // so the Reader Bonus headline reads at the same display weight
-        // as a chapter opener. Body sized to match the body paragraph
-        // so the explanatory text below the headline reads at the same
-        // rhythm as chapter prose. Both keep the CTA page inside the
-        // book's typographic system.
+        // Title sized to MATCH the chapter title (SPEC.chapterTitleSize) so
+        // the Reader Bonus headline reads at the same display weight as a
+        // chapter opener.
+        // Body is set 2pt LARGER than the chapter body paragraph (rather
+        // than equal) because the Reader Bonus body is short, marketing-
+        // style copy that benefits from a bit more presence and read-from-
+        // across-the-room scannability. 10pt body → 12pt CTA body,
+        // 11pt body → 13pt CTA body. Line-height keeps the same ratio to
+        // font size that the chapter body uses, so the rhythm is
+        // consistent across the book.
         const HEADER_BAR_H = 40;
         const URL_BAR_H = 40;
         const TITLE_SIZE = SPEC.chapterTitleSize;
         const TITLE_LINE_H = 28;                  // matches chapter title baseline-to-baseline
-        const BODY_SIZE = SPEC.bodySize;
-        const BODY_LINE_H = SPEC.lineHeight;      // baseline-to-baseline within body
+        const BODY_SIZE = SPEC.bodySize + 2;
+        const BODY_LINE_H = BODY_SIZE * (SPEC.lineHeight / SPEC.bodySize);
 
         // VISUAL gaps. Each is measured edge-to-edge of the visible text,
         // not baseline-to-baseline, so the rendered output matches the number.
@@ -2823,9 +2828,11 @@
         'div.cta-page .cta-banner { background: #111; color: #fff; padding: 0.8em; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 2em; }',
         // CTA title sized at h1 (1.8em — same as the chapter title) so
         // the Reader Bonus headline reads at the same display weight as
-        // a chapter opener. Body at 1em so it matches body paragraphs.
+        // a chapter opener. Body at 1.2em = ~+2pt over the body
+        // paragraph: short, marketing-style copy that benefits from a
+        // bit more presence than the chapter body.
         'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; line-height: 1.2; }',
-        'div.cta-page .cta-body { font-size: 1em; margin: 2em 10%; }',
+        'div.cta-page .cta-body { font-size: 1.2em; margin: 2em 10%; }',
         'div.cta-page .cta-url { background: #111; color: #fff; padding: 0.8em; margin: 2em 0; font-weight: bold; word-break: break-all; }',
       ].join("\n");
 
