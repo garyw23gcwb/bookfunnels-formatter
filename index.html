@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.9",
+      version: "0.13.0",
       date: "2026-05-13",
       changes: [
+        "0.13.0 - Paste from Word / Google Docs / Pages / Apple Notes / browsers now PRESERVES bold, italic, underline, and headings. Previously the paste handler only read text/plain from the clipboard, which strips all formatting; users had to re-mark every italicised passage by hand after paste. New helper htmlToMarkdownLite() reads the clipboard's text/html payload (every major editor puts one there), walks the DOM, and converts: <strong>/<b>/font-weight:bold→**bold**; <em>/<i>/font-style:italic→*italic*; <u>/text-decoration:underline→__underline__; <h1>→bare title (so chapter detection picks it up); <h2>→## subhead; <h3..h6>→### subhead; <p>/<div>→paragraph break; <br>→line break. Google Docs-style <b style=\"font-weight:normal\"> wrappers are correctly treated as NOT bold (Docs uses these for typesetting, not emphasis). Nested same-style elements aren't double-wrapped; whitespace inside formatted runs is moved OUTSIDE the markers so the renderer's inline parser matches correctly. Applied to the Step 3 chapter body editor AND the Step 2 manuscript paste box. Other fields (Dedication, CTA Description) continue to use the plain-text-only paste handler because they render their value verbatim and would show literal asterisks if markers leaked in.",
         "0.12.9 - Chapter reordering on Step 3. Each ChapterCard now has up (↑) and down (↓) arrow buttons in the header row alongside Edit and Remove. Click them to swap a chapter with its neighbour. Up is auto-disabled on the first chapter, Down on the last. The change flows through the same setChapters → autosave → render pipeline as any other chapter edit, so the final PDF and EPUB pick up the new order automatically — TOC entries reorder, chapter numbering (if you have explicit 'Chapter N' labels you may want to update them yourself), and page numbers all reflect the new sequence. No drag-and-drop library — buttons keep the UI keyboard-accessible and behave the same on mobile and desktop.",
         "0.12.8 - Back-matter chapters no longer get a drop cap on their first paragraph. Chapters flagged `includeInToc: false` — typically About the Author, Acknowledgments, also any user-marked back matter — now render their opening paragraph as normal justified body text instead of with the chapter-opener drop cap. Trade-book convention: drop caps belong to narrative chapter openers, not to biographical or legal end-pages. Implementation gates the drop-cap branch in both PDF passes on `ch.includeInToc !== false`, so the dry-run page count and the actual render stay in lockstep. Front matter and regular chapters are unchanged. No new UI — the existing 'Include in Table of Contents' checkbox on each chapter card now controls drop cap too (back matter doesn't appear in the TOC AND doesn't get a chapter-opener decoration — one flag, consistent meaning).",
         "0.12.7 - Copyright and Dedication pages now vertically center on the page instead of sitting in the upper third. Both pages used to start at a fixed y (200 for copyright, 150 for dedication), which on a 576pt page landed the block around 25-35% from the top — a visually awkward 'no man's land' between top and centre. New approach: measure the total visible block height first (sum of line advances), then compute the start y as (pageH - blockH) × 0.45 — the same slight-upper-bias formula used by the CTA page. Convention matches Chicago Manual of Style, New Hart's Rules (Oxford), and the KDP / IngramSpark self-publishing typography guidelines. EPUB output also updated: copyright and dedication pages get a new `.copyright-page` / `.dedication-page` wrapper with display:flex + justify-content:center + min-height:90vh so e-readers honouring viewport height (Apple Books, Kobo) render the same vertical-centring as the PDF.",
@@ -421,6 +422,162 @@
       }
 
       return result;
+    }
+
+    // Convert the HTML payload from a clipboard paste (Word, Google Docs,
+    // Pages, Apple Notes, web browsers) into our markdown-lite syntax so
+    // bold / italic / underline / headings survive the round trip into the
+    // chapter body editor. Used by normalizePasteIntoRichTextarea below
+    // when the clipboard has a text/html payload.
+    //
+    // We deliberately ignore the formatting we can't render (lists with
+    // bullets, links, colours, font sizes, tables \u2014 tables are pasted as
+    // markdown only via the dedicated "Paste a Word table" path); just
+    // extract the text. The goal is to STOP STRIPPING bold and italic,
+    // not to import a full Word document.
+    //
+    // Detection: tags <strong>, <b>, <em>, <i>, <u>, plus inline-style
+    // font-weight / font-style / text-decoration. Google Docs is special
+    // \u2014 it wraps everything in <b style="font-weight: normal"> for
+    // typesetting reasons, so we treat font-weight:normal as NOT bold even
+    // when the tag says <b>.
+    function htmlToMarkdownLite(html) {
+      if (!html || typeof DOMParser === "undefined") return "";
+      let doc;
+      try { doc = new DOMParser().parseFromString(html, "text/html"); }
+      catch (e) { return ""; }
+      if (!doc || !doc.body) return "";
+
+      function isBold(el) {
+        const tag = el.tagName.toLowerCase();
+        const fw = (el.style && el.style.fontWeight) || "";
+        if (tag === "strong" || tag === "b") {
+          // Google Docs wraps with <b style="font-weight:normal"> \u2014 ignore.
+          if (fw === "normal" || fw === "400") return false;
+          return true;
+        }
+        if (fw === "bold" || fw === "bolder") return true;
+        const n = parseInt(fw, 10);
+        if (!isNaN(n) && n >= 600) return true;
+        return false;
+      }
+      function isItalic(el) {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "em" || tag === "i") return true;
+        if (el.style && el.style.fontStyle === "italic") return true;
+        return false;
+      }
+      function isUnderline(el) {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "u") return true;
+        const td = el.style && el.style.textDecoration;
+        if (td && td.indexOf("underline") >= 0) return true;
+        return false;
+      }
+      // Wrap text with a marker but keep any leading / trailing whitespace
+      // OUTSIDE the marker, otherwise the renderer's inline-run parser
+      // won't match it.
+      function wrap(text, marker) {
+        const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+        if (!m || !m[2]) return text;
+        return m[1] + marker + m[2] + marker + m[3];
+      }
+
+      function walk(node, ctxBold, ctxItalic, ctxUnderline) {
+        let out = "";
+        const kids = node.childNodes;
+        for (let i = 0; i < kids.length; i++) {
+          const c = kids[i];
+          if (c.nodeType === 3) { out += c.textContent; continue; }    // TEXT_NODE
+          if (c.nodeType !== 1) continue;                              // ELEMENT_NODE only
+          const tag = c.tagName.toLowerCase();
+
+          // Block-level elements \u2192 paragraph break around their content.
+          if (tag === "p" || tag === "div") {
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
+            if (inner.trim()) out += inner + "\n\n";
+            else out += "\n\n";
+            continue;
+          }
+          if (tag === "br") { out += "\n"; continue; }
+          if (tag === "h1") {
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
+            if (inner.trim()) out += inner.trim() + "\n\n";  // bare title \u2014 chapter detect can pick it up
+            continue;
+          }
+          if (tag === "h2") {
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
+            if (inner.trim()) out += "## " + inner.trim() + "\n\n";
+            continue;
+          }
+          if (tag === "h3" || tag === "h4" || tag === "h5" || tag === "h6") {
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
+            if (inner.trim()) out += "### " + inner.trim() + "\n\n";
+            continue;
+          }
+          if (tag === "li") {
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
+            out += inner.trim() + "\n";
+            continue;
+          }
+          if (tag === "script" || tag === "style") continue;
+
+          // Inline formatting. Don't double-wrap nested same-style elements.
+          const wantBold = !ctxBold && isBold(c);
+          const wantItalic = !ctxItalic && isItalic(c);
+          const wantUnderline = !ctxUnderline && isUnderline(c);
+          let inner = walk(c, ctxBold || wantBold, ctxItalic || wantItalic, ctxUnderline || wantUnderline);
+          if (wantUnderline) inner = wrap(inner, "__");
+          if (wantItalic) inner = wrap(inner, "*");
+          if (wantBold) inner = wrap(inner, "**");
+          out += inner;
+        }
+        return out;
+      }
+
+      let result = walk(doc.body, false, false, false);
+      // Collapse runs of 3+ blank lines (Word produces lots of these), trim
+      // trailing spaces before newlines, and trim outer whitespace.
+      result = result.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+\n/g, "\n").trim();
+      // Normalize line endings the same way the plain-text path does so the
+      // downstream code sees one canonical form.
+      result = normalizeLineEndings(result);
+      return result;
+    }
+
+    // Rich-text paste handler. Used by the chapter body editor and the
+    // Step 2 manuscript paste box \u2014 places where the markdown-lite syntax
+    // means something and bold / italic / underline / headings should
+    // survive the paste. Other fields (Dedication, CTA Title, CTA
+    // Description) keep using the plain-text-only normalizePasteIntoTextarea
+    // since they render the value as-is without parsing markers.
+    function normalizePasteIntoRichTextarea(e) {
+      if (!e || !e.clipboardData) return;
+      const html = e.clipboardData.getData("text/html");
+      const text = e.clipboardData.getData("text/plain") || e.clipboardData.getData("text");
+      let normalized;
+      if (html) {
+        normalized = htmlToMarkdownLite(html);
+        // If the HTML reduces to nothing useful (some clipboards put empty
+        // wrapper HTML), fall back to the plain-text payload.
+        if (!normalized.trim() && text) normalized = normalizeLineEndings(text);
+      } else if (text) {
+        normalized = normalizeLineEndings(text);
+      } else {
+        return;
+      }
+      e.preventDefault();
+      const ta = e.target;
+      const start = ta.selectionStart || 0;
+      const end = ta.selectionEnd || 0;
+      const newValue = ta.value.slice(0, start) + normalized + ta.value.slice(end);
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(ta, newValue);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      const pos = start + normalized.length;
+      requestAnimationFrame(function() {
+        try { ta.setSelectionRange(pos, pos); } catch (e) {}
+      });
     }
 
     // Defensive paste handler. Some clipboard sources put line breaks on the
@@ -3340,7 +3497,7 @@
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 10, fontFamily: FONT, color: BRAND.textMuted, paddingRight: 4, lineHeight: 1.3, textAlign: "right" }}>**bold** *italic* ## heading<br/>body default: justified</span>
           </div>
-          <textarea ref={taRef} value={value} onChange={handleTextareaChange} onKeyDown={handleTextareaKeyDown} onPaste={normalizePasteIntoTextarea} rows={rows}
+          <textarea ref={taRef} value={value} onChange={handleTextareaChange} onKeyDown={handleTextareaKeyDown} onPaste={normalizePasteIntoRichTextarea} rows={rows}
             style={{ width: "100%", padding: "10px 14px", background: BRAND.white, border: "1px solid " + BRAND.border, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, color: BRAND.textPrimary, fontSize: 14, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.55, outline: "none", resize: "vertical", boxSizing: "border-box", display: "block" }} />
         </div>
       );
@@ -4367,7 +4524,7 @@
                   Upload .txt or .docx File
                   <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
                 </label>
-                <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }} onPaste={normalizePasteIntoTextarea}
+                <textarea value={rawText} onChange={function(e) { setRawText(e.target.value); }} onPaste={normalizePasteIntoRichTextarea}
                   placeholder="Paste your manuscript here..."
                   style={{ width: "100%", height: 400, padding: 16, background: BRAND.white, border: "1px solid " + BRAND.border, borderRadius: 10, color: BRAND.textPrimary, fontSize: 13, fontFamily: "'Gelasio', Georgia, serif", lineHeight: 1.6, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20, gap: 12, flexWrap: "wrap" }}>
