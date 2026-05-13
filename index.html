@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.8",
+      version: "0.12.9",
       date: "2026-05-13",
       changes: [
+        "0.12.9 - Chapter reordering on Step 3. Each ChapterCard now has up (↑) and down (↓) arrow buttons in the header row alongside Edit and Remove. Click them to swap a chapter with its neighbour. Up is auto-disabled on the first chapter, Down on the last. The change flows through the same setChapters → autosave → render pipeline as any other chapter edit, so the final PDF and EPUB pick up the new order automatically — TOC entries reorder, chapter numbering (if you have explicit 'Chapter N' labels you may want to update them yourself), and page numbers all reflect the new sequence. No drag-and-drop library — buttons keep the UI keyboard-accessible and behave the same on mobile and desktop.",
         "0.12.8 - Back-matter chapters no longer get a drop cap on their first paragraph. Chapters flagged `includeInToc: false` — typically About the Author, Acknowledgments, also any user-marked back matter — now render their opening paragraph as normal justified body text instead of with the chapter-opener drop cap. Trade-book convention: drop caps belong to narrative chapter openers, not to biographical or legal end-pages. Implementation gates the drop-cap branch in both PDF passes on `ch.includeInToc !== false`, so the dry-run page count and the actual render stay in lockstep. Front matter and regular chapters are unchanged. No new UI — the existing 'Include in Table of Contents' checkbox on each chapter card now controls drop cap too (back matter doesn't appear in the TOC AND doesn't get a chapter-opener decoration — one flag, consistent meaning).",
         "0.12.7 - Copyright and Dedication pages now vertically center on the page instead of sitting in the upper third. Both pages used to start at a fixed y (200 for copyright, 150 for dedication), which on a 576pt page landed the block around 25-35% from the top — a visually awkward 'no man's land' between top and centre. New approach: measure the total visible block height first (sum of line advances), then compute the start y as (pageH - blockH) × 0.45 — the same slight-upper-bias formula used by the CTA page. Convention matches Chicago Manual of Style, New Hart's Rules (Oxford), and the KDP / IngramSpark self-publishing typography guidelines. EPUB output also updated: copyright and dedication pages get a new `.copyright-page` / `.dedication-page` wrapper with display:flex + justify-content:center + min-height:90vh so e-readers honouring viewport height (Apple Books, Kobo) render the same vertical-centring as the PDF.",
         "0.12.6 - Reader Bonus headline size brought up to match the chapter title (SPEC.chapterTitleSize = 20pt) instead of the H2 headline size set in v0.12.4. The CTA page is a destination page in its own right — it deserves a chapter-opener-weight headline, not a section heading. Body text continues to match the body paragraph (SPEC.bodySize) and the URL bar / READER BONUS banner are unchanged. EPUB cta-title CSS lifted from 1.25em to 1.8em to match chapter h1.",
@@ -3437,7 +3438,7 @@
       );
     }
 
-    function ChapterCard({ chapter, index, onEdit, onRemove }) {
+    function ChapterCard({ chapter, index, total, onEdit, onRemove, onMoveUp, onMoveDown }) {
       const [expanded, setExpanded] = useState(false);
       const wordCount = chapter.body.split(/\s+/).filter(Boolean).length;
       // Ref to the body RichTextInput so the ImageGallery's Re-insert
@@ -3460,7 +3461,22 @@
                 </div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {/* Reorder controls: up / down arrows that swap this chapter
+                  with the neighbour above / below in the chapters array.
+                  Up is disabled on the first chapter, Down on the last. */}
+              <button
+                onClick={function() { onMoveUp(chapter.id); }}
+                disabled={index === 0}
+                title={index === 0 ? "Already first" : "Move this chapter up"}
+                style={{ background: "none", border: "1px solid " + BRAND.border, borderRadius: 6, color: index === 0 ? BRAND.textMuted + "55" : BRAND.textSecondary, cursor: index === 0 ? "default" : "pointer", fontSize: 13, fontFamily: FONT, padding: "2px 8px", lineHeight: 1, height: 24 }}
+              >↑</button>
+              <button
+                onClick={function() { onMoveDown(chapter.id); }}
+                disabled={index === total - 1}
+                title={index === total - 1 ? "Already last" : "Move this chapter down"}
+                style={{ background: "none", border: "1px solid " + BRAND.border, borderRadius: 6, color: index === total - 1 ? BRAND.textMuted + "55" : BRAND.textSecondary, cursor: index === total - 1 ? "default" : "pointer", fontSize: 13, fontFamily: FONT, padding: "2px 8px", lineHeight: 1, height: 24 }}
+              >↓</button>
               <button onClick={function() { setExpanded(!expanded); }} style={{ background: "none", border: "none", color: BRAND.accentDeep, cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px", fontWeight: 600 }}>{expanded ? "Collapse" : "Edit"}</button>
               <button onClick={function() { onRemove(chapter.id); }} style={{ background: "none", border: "none", color: BRAND.danger + "88", cursor: "pointer", fontSize: 12, fontFamily: FONT, padding: "4px 8px" }}>Remove</button>
             </div>
@@ -4052,6 +4068,23 @@
       const handleEditChapter = function(id, field, value) { setChapters(function(prev) { return prev.map(function(ch) { return ch.id === id ? Object.assign({}, ch, { [field]: value }) : ch; }); }); };
       const handleRemoveChapter = function(id) { setChapters(function(prev) { return prev.filter(function(ch) { return ch.id !== id; }); }); };
       const handleAddChapter = function() { setChapters(function(prev) { return prev.concat([{ id: Math.random().toString(36).slice(2), num: "Chapter " + (prev.length + 1), title: "", epigraph: "", epigraphAttribution: "", body: "", includeInToc: true, images: {} }]); }); };
+      // Reorder: swap a chapter with its neighbour. delta = -1 moves up,
+      // delta = +1 moves down. Out-of-range moves are a no-op so the
+      // caller doesn't have to bounds-check. The change propagates through
+      // the same setChapters → autosave → render pipeline as any other
+      // chapter edit, so the final PDF / EPUB picks up the new order
+      // automatically.
+      const handleMoveChapter = function(id, delta) {
+        setChapters(function(prev) {
+          const idx = prev.findIndex(function(c) { return c.id === id; });
+          if (idx < 0) return prev;
+          const targetIdx = idx + delta;
+          if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+          const next = prev.slice();
+          const tmp = next[idx]; next[idx] = next[targetIdx]; next[targetIdx] = tmp;
+          return next;
+        });
+      };
 
       const handleGenerate = async function() {
         setGenerating(true); setProgress("Starting..."); setError("");
@@ -4366,7 +4399,7 @@
                 </div>
                 <p style={{ color: BRAND.textSecondary, fontSize: 13, marginBottom: 8, fontFamily: FONT }}>{chapters.length} chapters detected &middot; {totalWords.toLocaleString()} total words</p>
                 <p style={{ color: BRAND.textMuted, fontSize: 12, marginBottom: 20, fontFamily: FONT }}>Click "Edit" on any chapter to adjust titles, epigraphs, or body text.</p>
-                {chapters.map(function(ch, i) { return <ChapterCard key={ch.id} chapter={ch} index={i} onEdit={handleEditChapter} onRemove={handleRemoveChapter} />; })}
+                {chapters.map(function(ch, i) { return <ChapterCard key={ch.id} chapter={ch} index={i} total={chapters.length} onEdit={handleEditChapter} onRemove={handleRemoveChapter} onMoveUp={function(id) { handleMoveChapter(id, -1); }} onMoveDown={function(id) { handleMoveChapter(id, +1); }} />; })}
                 <button onClick={handleAddChapter} style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px dashed " + BRAND.border, background: "transparent", color: BRAND.textMuted, cursor: "pointer", fontSize: 13, fontFamily: FONT, marginTop: 8 }}>+ Add Chapter</button>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
                   <Button variant="secondary" onClick={function() { setStep(1); }}>&larr; Back</Button>
