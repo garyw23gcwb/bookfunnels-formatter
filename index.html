@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.7",
+      version: "0.12.8",
       date: "2026-05-13",
       changes: [
+        "0.12.8 - Back-matter chapters no longer get a drop cap on their first paragraph. Chapters flagged `includeInToc: false` — typically About the Author, Acknowledgments, also any user-marked back matter — now render their opening paragraph as normal justified body text instead of with the chapter-opener drop cap. Trade-book convention: drop caps belong to narrative chapter openers, not to biographical or legal end-pages. Implementation gates the drop-cap branch in both PDF passes on `ch.includeInToc !== false`, so the dry-run page count and the actual render stay in lockstep. Front matter and regular chapters are unchanged. No new UI — the existing 'Include in Table of Contents' checkbox on each chapter card now controls drop cap too (back matter doesn't appear in the TOC AND doesn't get a chapter-opener decoration — one flag, consistent meaning).",
         "0.12.7 - Copyright and Dedication pages now vertically center on the page instead of sitting in the upper third. Both pages used to start at a fixed y (200 for copyright, 150 for dedication), which on a 576pt page landed the block around 25-35% from the top — a visually awkward 'no man's land' between top and centre. New approach: measure the total visible block height first (sum of line advances), then compute the start y as (pageH - blockH) × 0.45 — the same slight-upper-bias formula used by the CTA page. Convention matches Chicago Manual of Style, New Hart's Rules (Oxford), and the KDP / IngramSpark self-publishing typography guidelines. EPUB output also updated: copyright and dedication pages get a new `.copyright-page` / `.dedication-page` wrapper with display:flex + justify-content:center + min-height:90vh so e-readers honouring viewport height (Apple Books, Kobo) render the same vertical-centring as the PDF.",
         "0.12.6 - Reader Bonus headline size brought up to match the chapter title (SPEC.chapterTitleSize = 20pt) instead of the H2 headline size set in v0.12.4. The CTA page is a destination page in its own right — it deserves a chapter-opener-weight headline, not a section heading. Body text continues to match the body paragraph (SPEC.bodySize) and the URL bar / READER BONUS banner are unchanged. EPUB cta-title CSS lifted from 1.25em to 1.8em to match chapter h1.",
         "0.12.5 - Reader Bonus form UX rework so the URL bar never silently keeps stale sample data. Three changes to the Step 1 Reader Bonus panel: (1) New introductory hint at the top of the panel explicitly states the body and URL fields do NOT auto-detect each other. (2) Each input label now describes WHERE that field renders on the page: title → headline at the top, description → body text below the headline (with explicit 'do not put your URL here' warning), URL → black bar at the bottom. (3) A live preview of the black-bar URL appears immediately below the CTA URL field — same dark background, same typography — so the user can SEE what is about to render before generating. This prevents the very common failure mode where a user loads sample data, edits the title and body, and ships a book whose black bar still shows the sample URL. No renderer change — the PDF / EPUB output is unchanged; only the form UX is updated.",
@@ -1793,8 +1794,11 @@
           }
 
           // First paragraph with drop cap (body only — a heading at the top of
-          // a chapter does not get a drop cap).
-          if (isFirstPara && cls.type === "body" && para.length > 0) {
+          // a chapter does not get a drop cap). Back matter (chapters with
+          // includeInToc: false, e.g. About the Author, Acknowledgments)
+          // also skips the drop cap — that decoration belongs to chapter
+          // openers, not biographical / legal end-pages.
+          if (isFirstPara && cls.type === "body" && para.length > 0 && ch.includeInToc !== false) {
             const dc = pickDropCap(para);
             if (!dc) {
               const fl = doc.splitTextToSize(para, textW);
@@ -2196,8 +2200,11 @@
           // First paragraph with drop cap (body only — a heading at the top
           // of a chapter does not get a drop cap). Drop cap ignores
           // alignment by design — it always uses the default justified
-          // rendering. Per the v0.12.0 spec.
-          if (isFirstPara && cls.type === "body" && para.length > 0) {
+          // rendering. Per the v0.12.0 spec. Back matter (chapters flagged
+          // includeInToc: false, e.g. About the Author, Acknowledgments)
+          // skips the drop cap entirely — chapter-opener decoration is not
+          // appropriate for biographical or legal end-pages.
+          if (isFirstPara && cls.type === "body" && para.length > 0 && ch.includeInToc !== false) {
             const dc = pickDropCap(para);
             if (!dc) {
               isFirstPara = false;
