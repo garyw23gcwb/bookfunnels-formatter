@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.6",
+      version: "0.12.7",
       date: "2026-05-13",
       changes: [
+        "0.12.7 - Copyright and Dedication pages now vertically center on the page instead of sitting in the upper third. Both pages used to start at a fixed y (200 for copyright, 150 for dedication), which on a 576pt page landed the block around 25-35% from the top — a visually awkward 'no man's land' between top and centre. New approach: measure the total visible block height first (sum of line advances), then compute the start y as (pageH - blockH) × 0.45 — the same slight-upper-bias formula used by the CTA page. Convention matches Chicago Manual of Style, New Hart's Rules (Oxford), and the KDP / IngramSpark self-publishing typography guidelines. EPUB output also updated: copyright and dedication pages get a new `.copyright-page` / `.dedication-page` wrapper with display:flex + justify-content:center + min-height:90vh so e-readers honouring viewport height (Apple Books, Kobo) render the same vertical-centring as the PDF.",
         "0.12.6 - Reader Bonus headline size brought up to match the chapter title (SPEC.chapterTitleSize = 20pt) instead of the H2 headline size set in v0.12.4. The CTA page is a destination page in its own right — it deserves a chapter-opener-weight headline, not a section heading. Body text continues to match the body paragraph (SPEC.bodySize) and the URL bar / READER BONUS banner are unchanged. EPUB cta-title CSS lifted from 1.25em to 1.8em to match chapter h1.",
         "0.12.5 - Reader Bonus form UX rework so the URL bar never silently keeps stale sample data. Three changes to the Step 1 Reader Bonus panel: (1) New introductory hint at the top of the panel explicitly states the body and URL fields do NOT auto-detect each other. (2) Each input label now describes WHERE that field renders on the page: title → headline at the top, description → body text below the headline (with explicit 'do not put your URL here' warning), URL → black bar at the bottom. (3) A live preview of the black-bar URL appears immediately below the CTA URL field — same dark background, same typography — so the user can SEE what is about to render before generating. This prevents the very common failure mode where a user loads sample data, edits the title and body, and ships a book whose black bar still shows the sample URL. No renderer change — the PDF / EPUB output is unchanged; only the form UX is updated.",
         "0.12.4 - Reader Bonus / lead capture page typography matched to the rest of the book. Previously the CTA title rendered at a fixed 22pt and the CTA body at 12pt — both larger than anything else inside the book. New values: title = SPEC.bodySize + 3 (matches an H2 headline), body = SPEC.bodySize (matches a body paragraph). Title line height moves to size × 1.35 (same multiplier the chapter headings use). Both scale with the body-size preset, so Default (10/15) and Spacious (11/16.5) each get a CTA page that reads as part of the same typographic system. EPUB CSS updated to match: cta-title 1.25em (h2 size), cta-body 1em (body size). URL bar and READER BONUS header bar untouched — those are deliberate display elements and stay visually distinct.",
@@ -1719,23 +1720,45 @@
       doc.text(bookData.author.toUpperCase(), getCenterX(), ty, { align: "center" });
 
       newPage();
-      // Copyright page: start block around 35% down the page so the text sits in the upper
-      // middle of the page, which is the standard placement for a copyright/imprint page.
-      ty = 200; doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
-      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
-      doc.text("Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author, getCenterX(), ty, { align: "center" }); ty += 18;
+      // Copyright page: measure the block height first, then vertically
+      // center it on the page with a slight upper optical bias (0.45 of
+      // available whitespace above, 0.55 below). Human eyes read this as
+      // visually centered because optical center sits slightly above the
+      // geometric center on a tall page. Convention matches Chicago Manual
+      // of Style, New Hart's Rules, and the KDP / IngramSpark self-pub
+      // guidelines.
+      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
+      const copyrightLine = "Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
       const copLines = wrapText(copyrightText, getTextWidth() - 40, 9);
+      // Total visual block height (sum of line advances).
+      let copBlockH = 0;
+      if (bookData.publisher) copBlockH += 20;
+      copBlockH += 18;
+      copBlockH += copLines.length * 13;
+      if (bookData.isbn) copBlockH += 10 + 13;
+      ty = Math.max(80, (SPEC.pageH - copBlockH) * 0.45);
+      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
+      doc.text(copyrightLine, getCenterX(), ty, { align: "center" }); ty += 18;
       for (const line of copLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 13; }
       if (bookData.isbn) { ty += 10; doc.text("ISBN: " + bookData.isbn, getCenterX(), ty, { align: "center" }); }
       doc.setTextColor(30);
 
       if (bookData.dedication) {
-        newPage(); ty = 150;
+        // Dedication page: same vertical-centering approach. Dedication
+        // carries emotional weight \u2014 convention (Chicago Manual, Penguin /
+        // Random House) is to vertically center it with whitespace around
+        // so it reads as a contemplative pause before the chapter content.
+        newPage();
         doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(10);
-        const dedLines = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
-        for (const para of dedLines) {
-          const wrapped = wrapText(para, getTextWidth() - 20, 10, "italic");
+        const dedParas = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
+        // Pre-wrap each paragraph so we can measure total height.
+        const dedWrapped = dedParas.map(function(p) { return wrapText(p, getTextWidth() - 20, 10, "italic"); });
+        let dedBlockH = 0;
+        for (const w of dedWrapped) { dedBlockH += w.length * 16 + 10; }
+        if (dedBlockH > 0) dedBlockH -= 10;  // trim trailing inter-paragraph gap
+        ty = Math.max(80, (SPEC.pageH - dedBlockH) * 0.45);
+        for (const wrapped of dedWrapped) {
           for (const line of wrapped) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 16; }
           ty += 10;
         }
@@ -2622,6 +2645,11 @@
         'h1.chapter-opener { page-break-before: always; break-before: page; }',
         'p.dedication { font-style: italic; text-align: center; margin: 1em 2em; }',
         'p.copyright { font-size: 0.85em; text-align: center; margin: 0.3em 0; }',
+        // Vertically center the dedication and copyright blocks on the
+        // page in e-readers that honour viewport height. Matches the PDF
+        // convention (Chicago Manual / KDP / IngramSpark) of centering
+        // these front-matter pages rather than top-aligning them.
+        'div.dedication-page, div.copyright-page { display: flex; flex-direction: column; justify-content: center; min-height: 90vh; padding: 0 2em; }',
         'div.title-page { text-align: center; margin-top: 5em; page-break-before: always; break-before: page; }',
         'div.title-page h1 { font-size: 2.4em; page-break-before: auto; break-before: auto; }',
         'div.title-page .subtitle { font-style: italic; font-size: 1.2em; margin: 1em 2em; }',
@@ -2668,8 +2696,9 @@
       titlePageBody += '</div>';
       oebps.file("titlepage.xhtml", xhtmlDoc(bookData.title || "Title", titlePageBody));
 
-      // 6. Copyright page
-      let copyBody = '<div>\n';
+      // 6. Copyright page \u2014 wrapped in copyright-page container so the
+      // viewport-height flex centering in styles.css can take over.
+      let copyBody = '<div class="copyright-page">\n';
       if (bookData.publisher) copyBody += '  <p class="copyright">PUBLISHED BY ' + esc(bookData.publisher.toUpperCase()) + '</p>\n';
       copyBody += '  <p class="copyright">Copyright \u00A9 ' + new Date().getFullYear() + ' by ' + esc(bookData.author) + '</p>\n';
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
@@ -2678,11 +2707,11 @@
       copyBody += '</div>';
       oebps.file("copyright.xhtml", xhtmlDoc("Copyright", copyBody));
 
-      // 7. Dedication
+      // 7. Dedication \u2014 wrapped in dedication-page container for centering.
       let dedFile = null;
       if (bookData.dedication) {
         const dedParas = bookData.dedication.split("\n").filter(function(l) { return l.trim(); });
-        let dedBody = '<div>\n';
+        let dedBody = '<div class="dedication-page">\n';
         for (const p of dedParas) dedBody += '  <p class="dedication">' + esc(p) + '</p>\n';
         dedBody += '</div>';
         oebps.file("dedication.xhtml", xhtmlDoc("Dedication", dedBody));
