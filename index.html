@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.12.5",
+      version: "0.12.6",
       date: "2026-05-13",
       changes: [
+        "0.12.6 - Reader Bonus headline size brought up to match the chapter title (SPEC.chapterTitleSize = 20pt) instead of the H2 headline size set in v0.12.4. The CTA page is a destination page in its own right — it deserves a chapter-opener-weight headline, not a section heading. Body text continues to match the body paragraph (SPEC.bodySize) and the URL bar / READER BONUS banner are unchanged. EPUB cta-title CSS lifted from 1.25em to 1.8em to match chapter h1.",
         "0.12.5 - Reader Bonus form UX rework so the URL bar never silently keeps stale sample data. Three changes to the Step 1 Reader Bonus panel: (1) New introductory hint at the top of the panel explicitly states the body and URL fields do NOT auto-detect each other. (2) Each input label now describes WHERE that field renders on the page: title → headline at the top, description → body text below the headline (with explicit 'do not put your URL here' warning), URL → black bar at the bottom. (3) A live preview of the black-bar URL appears immediately below the CTA URL field — same dark background, same typography — so the user can SEE what is about to render before generating. This prevents the very common failure mode where a user loads sample data, edits the title and body, and ships a book whose black bar still shows the sample URL. No renderer change — the PDF / EPUB output is unchanged; only the form UX is updated.",
         "0.12.4 - Reader Bonus / lead capture page typography matched to the rest of the book. Previously the CTA title rendered at a fixed 22pt and the CTA body at 12pt — both larger than anything else inside the book. New values: title = SPEC.bodySize + 3 (matches an H2 headline), body = SPEC.bodySize (matches a body paragraph). Title line height moves to size × 1.35 (same multiplier the chapter headings use). Both scale with the body-size preset, so Default (10/15) and Spacious (11/16.5) each get a CTA page that reads as part of the same typographic system. EPUB CSS updated to match: cta-title 1.25em (h2 size), cta-body 1em (body size). URL bar and READER BONUS header bar untouched — those are deliberate display elements and stay visually distinct.",
         "0.12.3 - Load Sample Data now spawns a NEW project instead of overwriting the active one. Previously the button called setBookData / setRawText / setChapters([]) directly, blowing away whatever was in the current project. Now it follows the same pattern as the '+ New Project' entry in the picker — snapshot the current project, create a fresh slot populated with the sample payload, switch to it. The picker will show both your in-progress project AND the new 'Get Big Clients With Tiny Books' sample side by side; switching back returns you to your work untouched. Sample data extracted into module-level SAMPLE_BOOK_DATA / SAMPLE_RAW_TEXT constants so the payload lives separate from the handler.",
@@ -1583,15 +1584,16 @@
         const centerX = textX + textW / 2;
 
         // Layout constants.
-        // Title and body fonts deliberately MATCH the rest of the book —
-        // title = H2 headline size (bodySize + 3), body = body paragraph
-        // size — so the CTA page reads as part of the same typographic
-        // system as the chapters. Both scale with the body-size preset
-        // (Default 10/15 vs Spacious 11/16.5).
+        // Title sized to MATCH the chapter title (SPEC.chapterTitleSize)
+        // so the Reader Bonus headline reads at the same display weight
+        // as a chapter opener. Body sized to match the body paragraph
+        // so the explanatory text below the headline reads at the same
+        // rhythm as chapter prose. Both keep the CTA page inside the
+        // book's typographic system.
         const HEADER_BAR_H = 40;
         const URL_BAR_H = 40;
-        const TITLE_SIZE = SPEC.bodySize + 3;
-        const TITLE_LINE_H = TITLE_SIZE * 1.35;   // baseline-to-baseline within title
+        const TITLE_SIZE = SPEC.chapterTitleSize;
+        const TITLE_LINE_H = 28;                  // matches chapter title baseline-to-baseline
         const BODY_SIZE = SPEC.bodySize;
         const BODY_LINE_H = SPEC.lineHeight;      // baseline-to-baseline within body
 
@@ -2626,9 +2628,10 @@
         'div.title-page .author { font-weight: bold; margin-top: 3em; letter-spacing: 0.1em; text-transform: uppercase; }',
         'div.cta-page { text-align: center; margin: 3em 0; page-break-before: always; break-before: page; }',
         'div.cta-page .cta-banner { background: #111; color: #fff; padding: 0.8em; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 2em; }',
-        // CTA title sized at h2 (1.25em) and body at 1em so the lead-capture
-        // page matches the typographic system used by the rest of the book.
-        'div.cta-page .cta-title { font-size: 1.25em; font-weight: bold; margin: 1em 0; }',
+        // CTA title sized at h1 (1.8em — same as the chapter title) so
+        // the Reader Bonus headline reads at the same display weight as
+        // a chapter opener. Body at 1em so it matches body paragraphs.
+        'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; line-height: 1.2; }',
         'div.cta-page .cta-body { font-size: 1em; margin: 2em 10%; }',
         'div.cta-page .cta-url { background: #111; color: #fff; padding: 0.8em; margin: 2em 0; font-weight: bold; word-break: break-all; }',
       ].join("\n");
