@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.1",
-      date: "2026-05-13",
+      version: "0.13.2",
+      date: "2026-05-14",
       changes: [
+        "0.13.2 - Bold + italic combined (***text***) now renders correctly, AND EPUB output finally honours inline markdown markers. Two related fixes: (1) parseInlineRuns previously didn't recognise the triple-asterisk form — it greedy-matched the first **...** which left a stray * inside the bold run and another * after it; the user saw '*The Myth and the Mountain*' rendered in bold instead of bold-italic. New branch in parseInlineRuns detects ***...*** as its own 'bolditalic' style, checked BEFORE the ** rule so the triple form wins. pdfStyleFor maps bolditalic → 'bolditalic' which jsPDF picks up via a newly-loaded Gelasio 700-italic font variant (4th font in loadFontsForPDF). (2) The EPUB chapter renderer was escaping body text without parsing the markdown markers — Apple Books / Kobo / Kindle were showing literal **asterisks** and __underscores__ in the rendered output. New helper inlineMarkdownToHtml() converts the four markers to <strong> / <em> / <u> / <strong><em> HTML tags, applied to body paragraphs AND h2 / h3 headings. The PDF and the EPUB now produce consistent inline formatting.",
         "0.13.1 - Reader Bonus body text bumped from SPEC.bodySize to SPEC.bodySize + 2 (Default 10pt body → 12pt CTA body; Spacious 11pt → 13pt). The CTA body is short marketing-style copy on a destination page, not running narrative, so it benefits from a bit more presence than the chapter body — easier to scan from across the room. Line-height keeps the same ratio to font size that the chapter body uses, so the rhythm stays consistent. EPUB cta-body lifted from 1em to 1.2em to match.",
         "0.13.0 - Paste from Word / Google Docs / Pages / Apple Notes / browsers now PRESERVES bold, italic, underline, and headings. Previously the paste handler only read text/plain from the clipboard, which strips all formatting; users had to re-mark every italicised passage by hand after paste. New helper htmlToMarkdownLite() reads the clipboard's text/html payload (every major editor puts one there), walks the DOM, and converts: <strong>/<b>/font-weight:bold→**bold**; <em>/<i>/font-style:italic→*italic*; <u>/text-decoration:underline→__underline__; <h1>→bare title (so chapter detection picks it up); <h2>→## subhead; <h3..h6>→### subhead; <p>/<div>→paragraph break; <br>→line break. Google Docs-style <b style=\"font-weight:normal\"> wrappers are correctly treated as NOT bold (Docs uses these for typesetting, not emphasis). Nested same-style elements aren't double-wrapped; whitespace inside formatted runs is moved OUTSIDE the markers so the renderer's inline parser matches correctly. Applied to the Step 3 chapter body editor AND the Step 2 manuscript paste box. Other fields (Dedication, CTA Description) continue to use the plain-text-only paste handler because they render their value verbatim and would show literal asterisks if markers leaked in.",
         "0.12.9 - Chapter reordering on Step 3. Each ChapterCard now has up (↑) and down (↓) arrow buttons in the header row alongside Edit and Remove. Click them to swap a chapter with its neighbour. Up is auto-disabled on the first chapter, Down on the last. The change flows through the same setChapters → autosave → render pipeline as any other chapter edit, so the final PDF and EPUB pick up the new order automatically — TOC entries reorder, chapter numbering (if you have explicit 'Chapter N' labels you may want to update them yourself), and page numbers all reflect the new sequence. No drag-and-drop library — buttons keep the UI keyboard-accessible and behave the same on mobile and desktop.",
@@ -1011,7 +1012,19 @@
       const flushBuf = function() { if (buf.length > 0) { runs.push({ text: buf, style: "normal" }); buf = ""; } };
       let i = 0;
       while (i < text.length) {
-        const c = text[i], n = text[i + 1];
+        const c = text[i], n = text[i + 1], n2 = text[i + 2];
+        // Bold + italic combined: `***text***`. Checked BEFORE the `**`
+        // and `*` paths so the triple-asterisk form isn't greedy-matched
+        // by the bold rule (which would leave a stray `*` inside the
+        // bold run and another `*` after it).
+        if (c === "*" && n === "*" && n2 === "*") {
+          const end = text.indexOf("***", i + 3);
+          if (end !== -1 && text[end + 3] !== "*") {
+            flushBuf();
+            runs.push({ text: text.slice(i + 3, end), style: "bolditalic" });
+            i = end + 3; continue;
+          }
+        }
         if (c === "*" && n === "*") {
           const end = text.indexOf("**", i + 2);
           if (end !== -1) { flushBuf(); runs.push({ text: text.slice(i + 2, end), style: "bold" }); i = end + 2; continue; }
@@ -1034,7 +1047,36 @@
       return runs.map(function(r) { return r.text; }).join("");
     }
 
-    function pdfStyleFor(s) { return s === "bold" ? "bold" : s === "italic" ? "italic" : "normal"; }
+    function pdfStyleFor(s) {
+      if (s === "bolditalic") return "bolditalic";
+      if (s === "bold") return "bold";
+      if (s === "italic") return "italic";
+      return "normal";
+    }
+
+    // Convert our markdown-lite inline markers (***bolditalic***, **bold**,
+    // *italic*, __underline__) to inline HTML for the EPUB output. The
+    // PDF renderer handles these via parseInlineRuns + drawRunLine, but
+    // EPUB needs proper HTML tags so Apple Books / Kobo / Kindle render
+    // the styling instead of showing literal asterisks.
+    //
+    // Order matters: the most-specific marker first so triple-asterisk
+    // never gets matched by the double or single rule.
+    //
+    // escFn is the EPUB escape helper (defined inside generateEPUB) — we
+    // accept it as a parameter so this top-level helper doesn't need to
+    // duplicate the escape logic.
+    function inlineMarkdownToHtml(text, escFn) {
+      const esc = escFn || function(s) { return s; };
+      // Escape FIRST so any literal < > & " in the source text become HTML
+      // entities. The replacement step injects bare tags afterwards.
+      let html = esc(String(text == null ? "" : text));
+      html = html.replace(/\*\*\*([^*]+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+      html = html.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/\*([^*]+?)\*/g, "<em>$1</em>");
+      html = html.replace(/__([^_]+?)__/g, "<u>$1</u>");
+      return html;
+    }
 
     // Cheap gate: a paragraph has formatting iff parseInlineRuns produces
     // at least one non-normal run. If false, use the existing render path
@@ -1503,6 +1545,11 @@
         { family: "Gelasio", slug: "gelasio", weight: "400", style: "normal", jsPDFStyle: "normal" },
         { family: "Gelasio", slug: "gelasio", weight: "700", style: "normal", jsPDFStyle: "bold" },
         { family: "Gelasio", slug: "gelasio", weight: "400", style: "italic", jsPDFStyle: "italic" },
+        // Bold-italic variant. Needed so `***text***` can render as
+        // bold AND italic together — without this, jsPDF falls back to
+        // plain italic (or plain bold) and the combined formatting
+        // visually collapses to a single style.
+        { family: "Gelasio", slug: "gelasio", weight: "700", style: "italic", jsPDFStyle: "bolditalic" },
         { family: "EB Garamond", slug: "eb-garamond", weight: "400", style: "italic", jsPDFStyle: "italic" },
         { family: "Inter", slug: "inter", weight: "400", style: "normal", jsPDFStyle: "normal" },
       ];
@@ -2995,9 +3042,13 @@
             ? ' style="text-align:' + alignedPara.align + '"'
             : "";
           const cleaned = alignedPara.text;
-          if (cleaned.startsWith("## ")) body += '  <h2' + alignAttr + '>' + esc(cleaned.slice(3).trim()) + '</h2>\n';
-          else if (cleaned.startsWith("### ")) body += '  <h3' + alignAttr + '>' + esc(cleaned.slice(4).trim()) + '</h3>\n';
-          else body += '  <p' + alignAttr + '>' + esc(cleaned) + '</p>\n';
+          // Convert our markdown-lite inline markers to real HTML tags so
+          // bold / italic / underline / bold-italic render on Apple Books,
+          // Kobo, Kindle, etc. Without this, the readers see literal
+          // asterisks and underscores in the body text.
+          if (cleaned.startsWith("## ")) body += '  <h2' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(3).trim(), esc) + '</h2>\n';
+          else if (cleaned.startsWith("### ")) body += '  <h3' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(4).trim(), esc) + '</h3>\n';
+          else body += '  <p' + alignAttr + '>' + inlineMarkdownToHtml(cleaned, esc) + '</p>\n';
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
