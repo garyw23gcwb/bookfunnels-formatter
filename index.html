@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.6",
+      version: "0.13.7",
       date: "2026-05-18",
       changes: [
+        "0.13.7 - Step 4 preview thumbnail no longer hard-cuts content at the bottom of the page frame. With tables and multiple paragraphs the rendered content can overflow the 220x352 box (which is intentional — that ratio matches a real 5x8 book page, and a real page is bounded too). Previously the overflow:hidden produced an abrupt mid-line clip that looked broken. Added a 44pt white linear-gradient overlay at the bottom edge that fades the last lines out smoothly so the cropping reads as 'this is a thumbnail of one page' instead of 'something rendered wrong'. Overlay uses pointer-events:none so it doesn't intercept clicks.",
         "0.13.6 - Step 4 preview thumbnail now actually renders markdown tables as tables (was still showing them as raw markdown after 0.13.5). Root cause: 0.13.5 split the body with the naïve .split(/\\n\\s*\\n/) + .replace(/\\n/g, ' ') pattern lifted from prose-paragraph handling. That collapses the row newlines INSIDE a table to spaces, so the table classifier (which needs newlines between rows to recognize the | header | / |---|---| / | cell | structure) never saw a real table and the block fell through to plain prose rendering. Fix: PagePreview now uses splitChapterBody() — the existing helper that preserves row newlines for tables and promotes scene-break ornaments to their own paragraph — and pipes each chunk through classifyParagraph(), the same classifier the PDF and EPUB renderers use. Tables in the thumbnail now appear as actual mini <table>s. Also added a placeholder for image blocks ([image]) so they no longer appear blank.",
         "0.13.5 - Step 4 page preview thumbnail now actually previews the rendered output instead of dumping raw chapter body text. Previously the preview pane sliced `ch.body.slice(0, 350)` and rendered it as one flat string, so markdown markers (**bold**, *italic*, __underline__) and entire markdown tables (| Step | Action | ... | rows) showed up as literal text — visually identical to the editor textarea and easily mistaken by the user for what the PDF would look like. New preview: paragraphs are split the same way the PDF / EPUB renderers split them, each block is classified (table / scene break / H2 / H3 / prose) using the same helpers the real renderers use (looksLikeMarkdownTable, parseMarkdownTable, isSectionBreak, parseAlignment), and rendered as actual mini HTML elements — markdown tables become small <table>s with bold grey-filled headers, H2 / H3 render as bold larger text, scene breaks become centered '* * *' ornaments, inline **/*/__/*** markers become real <strong> / <em> / <u> / <strong><em> tags. Drop cap still applies to the first prose paragraph (skips headings and tables, matching the PDF). Capped at 7 blocks total and table rows trimmed to 5 so the thumbnail stays inside its 220 × 352 frame. Uses inlineMarkdownToHtml under React's dangerouslySetInnerHTML — content is HTML-escaped before markers are converted, so user-pasted '<script>' tags remain inert.",
         "0.13.4 - Bold / italic markers inside table cells no longer leak as literal asterisks. v0.13.3 made Word tables come through as proper markdown tables, but Word bolds its header rows, so the paste handler wrapped each header cell in **...** — and both renderers (jspdf-autotable for the PDF, <td> emission for the EPUB) shipped that raw text to the page. Two fixes: (1) PDF — new formatTableCellForAutoTable() pre-processes every cell on its way into autotable. Whole-cell **bold** / *italic* / ***bolditalic*** becomes a real autotable cell-object with styles.fontStyle set to the right weight, so the cell renders bold / italic / bold-italic instead of showing the markers. Cells with partial inline emphasis collapse to plain text (autotable can't paint mixed styles inside one cell, and shipping literal asterisks is worse than losing the emphasis). __underline__ also degrades to plain text since 'underline' isn't an autotable fontStyle. (2) EPUB — the table HTML emitter now runs cell content through inlineMarkdownToHtml() instead of bare esc(), so **bold**, *italic*, __underline__, and ***bolditalic*** in cells become <strong>, <em>, <u>, <strong><em> tags that Apple Books / Kobo / Kindle render correctly. New helper flattenInlineMarkdown() is shared by both paths.",
@@ -3892,7 +3893,7 @@
       }
 
       return (
-        <div style={{ width: 220, height: 352, background: "#fff", borderRadius: 4, overflow: "hidden", flexShrink: 0, border: "1px solid " + BRAND.border, boxShadow: "0 4px 24px rgba(26,33,44,0.1)" }}>
+        <div style={{ position: "relative", width: 220, height: 352, background: "#fff", borderRadius: 4, overflow: "hidden", flexShrink: 0, border: "1px solid " + BRAND.border, boxShadow: "0 4px 24px rgba(26,33,44,0.1)" }}>
           <div style={{ padding: "24px 16px 14px", textAlign: "center" }}>
             {ch.num && <div style={{ fontFamily: serif, fontSize: 9, color: "#555", marginBottom: 12 }}>{ch.num}</div>}
             <div style={{ fontFamily: serif, fontSize: 12, fontWeight: 700, color: "#111", lineHeight: 1.3, marginBottom: 10 }}>{ch.title}</div>
@@ -3955,6 +3956,11 @@
               })}
             </div>
           </div>
+          {/* Soft fade at the bottom edge of the page thumbnail so any
+              content that runs past the 5x8 frame fades out cleanly
+              instead of getting hard-cut mid-line. This is a thumbnail
+              of one page, not the full chapter. */}
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 44, pointerEvents: "none", background: "linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,1) 85%)" }} />
         </div>
       );
     }
