@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.2",
+      version: "0.13.3",
       date: "2026-05-14",
       changes: [
+        "0.13.3 - Paste-from-Word tables work again. Regression from 0.13.0: the new htmlToMarkdownLite() reads the clipboard's text/html payload but had no case for <table>, so Word / Docs / Pages tables were flattened to a single run of cell text with no rows or columns. The plain-text fallback (which routes through tryConvertTabularToMarkdown and would have produced a proper markdown table from the tab-separated payload) only fired when the HTML reduced to nothing, and 'all the cell text concatenated' isn't nothing — so it never triggered. Fix: htmlToMarkdownLite now has a dedicated <table> branch that walks <tr>/<td>/<th> and emits the `| header | header |` + `|---|---|` + `| cell | cell |` markdown table syntax that parseMarkdownTable already understands. Direct-child filtering on <tr> and <td> so nested tables don't get double-walked. Cells are walked recursively, so bold / italic / underline inside a cell still survive the round trip. Mixed pastes (a Word selection that includes prose AROUND a table) now work too — the prose comes through as paragraphs and the table comes through as a real table.",
         "0.13.2 - Bold + italic combined (***text***) now renders correctly, AND EPUB output finally honours inline markdown markers. Two related fixes: (1) parseInlineRuns previously didn't recognise the triple-asterisk form — it greedy-matched the first **...** which left a stray * inside the bold run and another * after it; the user saw '*The Myth and the Mountain*' rendered in bold instead of bold-italic. New branch in parseInlineRuns detects ***...*** as its own 'bolditalic' style, checked BEFORE the ** rule so the triple form wins. pdfStyleFor maps bolditalic → 'bolditalic' which jsPDF picks up via a newly-loaded Gelasio 700-italic font variant (4th font in loadFontsForPDF). (2) The EPUB chapter renderer was escaping body text without parsing the markdown markers — Apple Books / Kobo / Kindle were showing literal **asterisks** and __underscores__ in the rendered output. New helper inlineMarkdownToHtml() converts the four markers to <strong> / <em> / <u> / <strong><em> HTML tags, applied to body paragraphs AND h2 / h3 headings. The PDF and the EPUB now produce consistent inline formatting.",
         "0.13.1 - Reader Bonus body text bumped from SPEC.bodySize to SPEC.bodySize + 2 (Default 10pt body → 12pt CTA body; Spacious 11pt → 13pt). The CTA body is short marketing-style copy on a destination page, not running narrative, so it benefits from a bit more presence than the chapter body — easier to scan from across the room. Line-height keeps the same ratio to font size that the chapter body uses, so the rhythm stays consistent. EPUB cta-body lifted from 1em to 1.2em to match.",
         "0.13.0 - Paste from Word / Google Docs / Pages / Apple Notes / browsers now PRESERVES bold, italic, underline, and headings. Previously the paste handler only read text/plain from the clipboard, which strips all formatting; users had to re-mark every italicised passage by hand after paste. New helper htmlToMarkdownLite() reads the clipboard's text/html payload (every major editor puts one there), walks the DOM, and converts: <strong>/<b>/font-weight:bold→**bold**; <em>/<i>/font-style:italic→*italic*; <u>/text-decoration:underline→__underline__; <h1>→bare title (so chapter detection picks it up); <h2>→## subhead; <h3..h6>→### subhead; <p>/<div>→paragraph break; <br>→line break. Google Docs-style <b style=\"font-weight:normal\"> wrappers are correctly treated as NOT bold (Docs uses these for typesetting, not emphasis). Nested same-style elements aren't double-wrapped; whitespace inside formatted runs is moved OUTSIDE the markers so the renderer's inline parser matches correctly. Applied to the Step 3 chapter body editor AND the Step 2 manuscript paste box. Other fields (Dedication, CTA Description) continue to use the plain-text-only paste handler because they render their value verbatim and would show literal asterisks if markers leaked in.",
@@ -520,6 +521,40 @@
           if (tag === "li") {
             const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
             out += inner.trim() + "\n";
+            continue;
+          }
+          // Word / Docs / Pages tables — emit markdown table syntax that
+          // parseMarkdownTable can read. Walk each cell recursively so any
+          // bold / italic / underline inside the cell still survives.
+          if (tag === "table") {
+            const trs = Array.from(c.querySelectorAll("tr")).filter(function(tr) {
+              return tr.closest("table") === c;
+            });
+            const rows = [];
+            for (let r = 0; r < trs.length; r++) {
+              const cells = Array.from(trs[r].querySelectorAll("td,th")).filter(function(td) {
+                return td.closest("table") === c;
+              });
+              const row = [];
+              for (let cc = 0; cc < cells.length; cc++) {
+                const cellText = walk(cells[cc], ctxBold, ctxItalic, ctxUnderline)
+                  .replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+                row.push(cellText);
+              }
+              if (row.length > 0) rows.push(row);
+            }
+            if (rows.length >= 1) {
+              const colCount = rows.reduce(function(m, r) { return Math.max(m, r.length); }, 0);
+              for (const r of rows) { while (r.length < colCount) r.push(""); }
+              const lines = [];
+              lines.push("| " + rows[0].join(" | ") + " |");
+              const sep = []; for (let i = 0; i < colCount; i++) sep.push("----------");
+              lines.push("|" + sep.join("|") + "|");
+              for (let r = 1; r < rows.length; r++) {
+                lines.push("| " + rows[r].join(" | ") + " |");
+              }
+              out += "\n\n" + lines.join("\n") + "\n\n";
+            }
             continue;
           }
           if (tag === "script" || tag === "style") continue;
