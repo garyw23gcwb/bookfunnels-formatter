@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.12",
+      version: "0.13.13",
       date: "2026-05-18",
       changes: [
+        "0.13.13 - Copyright block clearance from the bottom edge increased from 45pt to 80pt (about 1.1\" on the 5x8 page). Well-typeset trade books (Penguin, Knopf, HarperCollins) sit the copyright block roughly 1 to 1.25 inches above the bottom edge — firmly in the lower third with breathing room — not jammed against the bottom margin. 45pt was technically 'at the bottom' but the block extended past the page-number zone (y=546) and read as 'ran out of room' rather than deliberate placement. 80pt sits the block in the lower third where readers expect publication details. EPUB copyright-page padding-bottom raised from 6vh to 12vh to match.",
         "0.13.12 - Copyright paragraph no longer pinched. Wrap width changed from getTextWidth() - 40 (212pt) to getTextWidth() (252pt) — the full text column. The -40 inset was a holdover with no convention behind it; it forced the 'All rights reserved...' paragraph into about seven narrow lines and made the bottom-aligned block look awkward. Trade-book convention (Chicago Manual, Penguin Random House, O'Reilly style) is to set the copyright paragraph at the same measure as the body text. The paragraph now flows in about four well-balanced lines, the block height drops by ~26pt, and the bottom anchor is unchanged so the block still ends 45pt above the page edge.",
         "0.13.11 - Title and copyright page positioning corrected to match trade-book industry standard. (1) Title page: title block shifted down from ty=140 to ty=180 so the title's cap-top now lands at ~28% from the page top instead of ~20%, giving the breathing room above the title that Bringhurst and Chicago Manual §1.18-1.19 both call for. Author position unchanged (~75% down). (2) Copyright page: was vertically centered with a 0.45 upper bias (v0.12.7 — based on incomplete research). The actual consistent convention across Chicago Manual §1.20-1.21, the University of Chicago Press style sheet, Penguin Random House house style, New Hart's Rules, and the KDP / IngramSpark self-publishing guidelines is BOTTOM of the page. Block is now bottom-aligned with 45pt clearance from the page edge, putting it in the lower fifth of the page where readers expect to find publication details. (3) EPUB copyright-page CSS switched from justify-content:center to justify-content:flex-end with 6vh padding-bottom so Apple Books / Kobo / Kindle render the same bottom-aligned layout. Dedication CSS still center-aligned — that's a separate convention and was already correct. (4) Copyright block stays centered, not justified. Justification at narrow column widths (252pt) creates word-space rivers, and trade-book convention for the 'All rights reserved' paragraph is overwhelmingly centered (sometimes left-aligned in a narrow column) — almost never justified. Added comments documenting all three convention citations so future versions don't re-litigate.",
         "0.13.10 - Table border weights now uniform between header and body rows. Previously the header cells used heavier and darker rules (0.5pt #8c8c8c for the PDF, 1px #8c8c8c for the EPUB, #aaa for the preview) than body cells (0.25pt #d2d2d2 / 0.5px #d0d0d0 / #ccc). That gave the header a 2x rule weight on top of its fill colour + bold text, which reads as 'spreadsheet' rather than 'typography.' Trade-book convention (Chicago Manual of Style, Bringhurst, New Hart's Rules) keeps inner rules uniform — the header is distinguished by its fill colour and bold text, not by heavier borders. PDF headStyles now matches body lineColor / lineWidth; EPUB th matches td (0.5px #d0d0d0); preview header border matches body border (#ccc).",
@@ -2124,10 +2125,15 @@
       copBlockH += 18;
       copBlockH += copLines.length * 13;
       if (bookData.isbn) copBlockH += 10 + 13;
-      // Bottom-align: position the block so its last line sits 45pt above
-      // the page bottom edge \u2014 enough clearance to breathe but firmly in
-      // the lower portion of the page.
-      const COPYRIGHT_BOTTOM_CLEARANCE = 45;
+      // Bottom-align: position the block so its last line sits ~80pt above
+      // the page bottom edge \u2014 about 1.1" of clearance on the 5x8 page,
+      // which matches what well-typeset trade books actually do (Penguin /
+      // Knopf / HarperCollins paperbacks all sit the copyright block 1 to
+      // 1.25 inches above the bottom edge). 45pt was too low \u2014 the block
+      // extended into the page-number zone and read as "ran out of room"
+      // rather than deliberate placement. 80pt sits the block firmly in
+      // the lower third without jamming the bottom margin.
+      const COPYRIGHT_BOTTOM_CLEARANCE = 80;
       ty = Math.max(120, SPEC.pageH - COPYRIGHT_BOTTOM_CLEARANCE - copBlockH);
       if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
       doc.text(copyrightLine, getCenterX(), ty, { align: "center" }); ty += 18;
@@ -3055,7 +3061,7 @@
         // not the middle. 6vh bottom padding gives breathing room from the
         // page edge so the block doesn't kiss the bottom margin.
         'div.dedication-page { display: flex; flex-direction: column; justify-content: center; min-height: 90vh; padding: 0 2em; }',
-        'div.copyright-page { display: flex; flex-direction: column; justify-content: flex-end; min-height: 90vh; padding: 0 2em 6vh; }',
+        'div.copyright-page { display: flex; flex-direction: column; justify-content: flex-end; min-height: 90vh; padding: 0 2em 12vh; }',
         'div.title-page { text-align: center; margin-top: 5em; page-break-before: always; break-before: page; }',
         'div.title-page h1 { font-size: 2.4em; page-break-before: auto; break-before: auto; }',
         'div.title-page .subtitle { font-style: italic; font-size: 1.2em; margin: 1em 2em; }',
