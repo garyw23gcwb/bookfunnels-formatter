@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.9",
+      version: "0.13.10",
       date: "2026-05-18",
       changes: [
+        "0.13.10 - Table border weights now uniform between header and body rows. Previously the header cells used heavier and darker rules (0.5pt #8c8c8c for the PDF, 1px #8c8c8c for the EPUB, #aaa for the preview) than body cells (0.25pt #d2d2d2 / 0.5px #d0d0d0 / #ccc). That gave the header a 2x rule weight on top of its fill colour + bold text, which reads as 'spreadsheet' rather than 'typography.' Trade-book convention (Chicago Manual of Style, Bringhurst, New Hart's Rules) keeps inner rules uniform — the header is distinguished by its fill colour and bold text, not by heavier borders. PDF headStyles now matches body lineColor / lineWidth; EPUB th matches td (0.5px #d0d0d0); preview header border matches body border (#ccc).",
         "0.13.9 - Two trade-book typography conventions for tables (Chicago Manual of Style / New Hart's Rules / Bringhurst). (1) Numeric columns auto-right-align. New helper computeEffectiveAlignments() walks each column's body cells (excluding the header — '2024' shouldn't make a column numeric on its own) and right-aligns the column when at least 70% of non-empty cells parse as numeric: integers, decimals, thousands-separated, currency-prefixed (€$£¥), percentages, accounting parentheses. NUMERIC_CELL_RE handles all of '42', '1,250', '$1,250.00', '12.5%', '(3.20)', '-5'. Columns the writer explicitly set to center or right via the markdown :---:/:---/---: separator are left alone; only the default-left case gets the auto-detect. (2) Empty cells render as em-dash so they don't read as missing data. Applied at the cell-formatting level in formatTableCellForAutoTable (PDF), the cellHtml helper in the EPUB chapter renderer, and in the Step 4 preview thumbnail's table rendering, so all three outputs are consistent. The em-dash check runs first, so even **__** (whole-cell bold wrapping a blank) flattens to an em-dash rather than a styled empty cell.",
         "0.13.8 - Tables that span more than one page now break correctly. Previously jspdf-autotable was running with its default page-break options, which allow a single row to be split mid-cell across pages — orphaning content like 'Low CTR but some' on one page and 'purchases' (the rest of that same cell) on the next. That violates every trade-book typography standard (Chicago Manual of Style, New Hart's Rules / Oxford, Bringhurst, IngramSpark / KDP imposition guidelines): rows are atomic, and breaks land at row boundaries only. Fix is three autotable options applied in buildAutoTableOptions: pageBreak:'avoid' tries to keep the whole table together (short tables that don't fit on the current page move whole to the next page); rowPageBreak:'avoid' makes any unavoidable break land between rows, never within one; showHead:'everyPage' repeats the bold header row on each continuation page so the reader always has column context. The pass-1 dry-run uses the same options so the TOC page counts stay accurate. No change to short tables that already fit on one page — they render identically to v0.13.7.",
         "0.13.7 - Step 4 preview thumbnail no longer hard-cuts content at the bottom of the page frame. With tables and multiple paragraphs the rendered content can overflow the 220x352 box (which is intentional — that ratio matches a real 5x8 book page, and a real page is bounded too). Previously the overflow:hidden produced an abrupt mid-line clip that looked broken. Added a 44pt white linear-gradient overlay at the bottom edge that fades the last lines out smoothly so the cropping reads as 'this is a thumbnail of one page' instead of 'something rendered wrong'. Overlay uses pointer-events:none so it doesn't intercept clicks.",
@@ -970,8 +971,14 @@
           textColor: [30, 30, 30],
           fontStyle: "bold",
           cellPadding: { top: 6, right: 7, bottom: 6, left: 7 },
-          lineColor: [140, 140, 140],
-          lineWidth: 0.5,
+          // Match body rule color and weight on purpose. Trade-book
+          // convention (Chicago / Bringhurst / New Hart's): rules are
+          // uniform inside the table; the header is distinguished by its
+          // fill colour + bold text, not by heavier rules around the
+          // header cells. Heavier borders here read as "spreadsheet,"
+          // not "typography."
+          lineColor: [210, 210, 210],
+          lineWidth: 0.25,
         },
         alternateRowStyles: { fillColor: [250, 250, 250] },
       };
@@ -2996,7 +3003,10 @@
         // padding than vertical, header slightly more padded.
         'table.md-table { border-collapse: collapse; margin: 1.5em 0; width: 100%; font-size: 0.9em; }',
         'table.md-table td { border: 0.5px solid #d0d0d0; padding: 5px 7px; vertical-align: top; }',
-        'table.md-table th { border: 1px solid #8c8c8c; background: #f0f0f0; font-weight: bold; text-align: left; padding: 6px 7px; vertical-align: top; }',
+        // Header rules match body rules on purpose — the fill + bold do
+        // the visual work of separating header from body. Chicago / Bringhurst
+        // / New Hart's all keep inner rules uniform.
+        'table.md-table th { border: 0.5px solid #d0d0d0; background: #f0f0f0; font-weight: bold; text-align: left; padding: 6px 7px; vertical-align: top; }',
         // Scene break ornament: three centered asterisks separated by spaces,
         // wide breathing room above and below to read clearly as a transition.
         'p.scene-break { text-align: center; margin: 1.8em 0; letter-spacing: 0.5em; }',
@@ -3996,7 +4006,7 @@
                       <thead>
                         <tr>
                           {t.headers.map(function(h, i) {
-                            return <th key={i} style={{ border: "0.4px solid #aaa", background: "#f0f0f0", fontWeight: 700, padding: "2px 3px", textAlign: (effAlign[i] || "left"), color: "#222" }} dangerouslySetInnerHTML={cellMd(h)} />;
+                            return <th key={i} style={{ border: "0.4px solid #ccc", background: "#f0f0f0", fontWeight: 700, padding: "2px 3px", textAlign: (effAlign[i] || "left"), color: "#222" }} dangerouslySetInnerHTML={cellMd(h)} />;
                           })}
                         </tr>
                       </thead>
