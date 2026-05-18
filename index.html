@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.10",
+      version: "0.13.11",
       date: "2026-05-18",
       changes: [
+        "0.13.11 - Title and copyright page positioning corrected to match trade-book industry standard. (1) Title page: title block shifted down from ty=140 to ty=180 so the title's cap-top now lands at ~28% from the page top instead of ~20%, giving the breathing room above the title that Bringhurst and Chicago Manual §1.18-1.19 both call for. Author position unchanged (~75% down). (2) Copyright page: was vertically centered with a 0.45 upper bias (v0.12.7 — based on incomplete research). The actual consistent convention across Chicago Manual §1.20-1.21, the University of Chicago Press style sheet, Penguin Random House house style, New Hart's Rules, and the KDP / IngramSpark self-publishing guidelines is BOTTOM of the page. Block is now bottom-aligned with 45pt clearance from the page edge, putting it in the lower fifth of the page where readers expect to find publication details. (3) EPUB copyright-page CSS switched from justify-content:center to justify-content:flex-end with 6vh padding-bottom so Apple Books / Kobo / Kindle render the same bottom-aligned layout. Dedication CSS still center-aligned — that's a separate convention and was already correct. (4) Copyright block stays centered, not justified. Justification at narrow column widths (252pt) creates word-space rivers, and trade-book convention for the 'All rights reserved' paragraph is overwhelmingly centered (sometimes left-aligned in a narrow column) — almost never justified. Added comments documenting all three convention citations so future versions don't re-litigate.",
         "0.13.10 - Table border weights now uniform between header and body rows. Previously the header cells used heavier and darker rules (0.5pt #8c8c8c for the PDF, 1px #8c8c8c for the EPUB, #aaa for the preview) than body cells (0.25pt #d2d2d2 / 0.5px #d0d0d0 / #ccc). That gave the header a 2x rule weight on top of its fill colour + bold text, which reads as 'spreadsheet' rather than 'typography.' Trade-book convention (Chicago Manual of Style, Bringhurst, New Hart's Rules) keeps inner rules uniform — the header is distinguished by its fill colour and bold text, not by heavier borders. PDF headStyles now matches body lineColor / lineWidth; EPUB th matches td (0.5px #d0d0d0); preview header border matches body border (#ccc).",
         "0.13.9 - Two trade-book typography conventions for tables (Chicago Manual of Style / New Hart's Rules / Bringhurst). (1) Numeric columns auto-right-align. New helper computeEffectiveAlignments() walks each column's body cells (excluding the header — '2024' shouldn't make a column numeric on its own) and right-aligns the column when at least 70% of non-empty cells parse as numeric: integers, decimals, thousands-separated, currency-prefixed (€$£¥), percentages, accounting parentheses. NUMERIC_CELL_RE handles all of '42', '1,250', '$1,250.00', '12.5%', '(3.20)', '-5'. Columns the writer explicitly set to center or right via the markdown :---:/:---/---: separator are left alone; only the default-left case gets the auto-detect. (2) Empty cells render as em-dash so they don't read as missing data. Applied at the cell-formatting level in formatTableCellForAutoTable (PDF), the cellHtml helper in the EPUB chapter renderer, and in the Step 4 preview thumbnail's table rendering, so all three outputs are consistent. The em-dash check runs first, so even **__** (whole-cell bold wrapping a blank) flattens to an em-dash rather than a styled empty cell.",
         "0.13.8 - Tables that span more than one page now break correctly. Previously jspdf-autotable was running with its default page-break options, which allow a single row to be split mid-cell across pages — orphaning content like 'Low CTR but some' on one page and 'purchases' (the rest of that same cell) on the next. That violates every trade-book typography standard (Chicago Manual of Style, New Hart's Rules / Oxford, Bringhurst, IngramSpark / KDP imposition guidelines): rows are atomic, and breaks land at row boundaries only. Fix is three autotable options applied in buildAutoTableOptions: pageBreak:'avoid' tries to keep the whole table together (short tables that don't fit on the current page move whole to the next page); rowPageBreak:'avoid' makes any unavoidable break land between rows, never within one; showHead:'everyPage' repeats the bold header row on each continuation page so the reader always has column context. The pass-1 dry-run uses the same options so the TOC page counts stay accurate. No change to short tables that already fit on one page — they render identically to v0.13.7.",
@@ -2069,7 +2070,14 @@
       }
 
       newPage();
-      let ty = 140;
+      // Title page layout. Trade-book convention (Chicago Manual §1.18-1.19,
+      // Bringhurst, New Hart's Rules): title sits in the UPPER portion with
+      // breathing room above it — not pinned to the top edge — and the author
+      // appears well below the title in the lower third of the page. With
+      // ty=180 the title's cap-top lands at about 28% from the page top,
+      // matching the look you see in well-typeset hardcover trade fiction
+      // and nonfiction. Author still sits at ty=430 (~75% down).
+      let ty = 180;
       doc.setFont(BODY_FONT, "bold"); doc.setFontSize(28); doc.setTextColor(30);
       const titleLines = wrapText(bookData.title, getTextWidth(), 28, "bold");
       for (const line of titleLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 35; }
@@ -2084,13 +2092,21 @@
       doc.text(bookData.author.toUpperCase(), getCenterX(), ty, { align: "center" });
 
       newPage();
-      // Copyright page: measure the block height first, then vertically
-      // center it on the page with a slight upper optical bias (0.45 of
-      // available whitespace above, 0.55 below). Human eyes read this as
-      // visually centered because optical center sits slightly above the
-      // geometric center on a tall page. Convention matches Chicago Manual
-      // of Style, New Hart's Rules, and the KDP / IngramSpark self-pub
-      // guidelines.
+      // Copyright page. Trade-book convention (Chicago Manual \u00A71.20-1.21,
+      // University of Chicago Press, Penguin Random House style, New Hart's
+      // Rules, KDP / IngramSpark guidelines): the copyright statement and
+      // publication details are set NEAR THE BOTTOM of the page, not
+      // centered or in the upper portion. Earlier versions (0.12.7) centered
+      // this \u2014 that was based on a partial reading; the consistent house-
+      // style call across the trade is bottom-aligned with breathing room
+      // above and a small clearance below.
+      //
+      // Alignment: every line of the copyright block is CENTERED. The long
+      // "All rights reserved..." paragraph is centered rather than
+      // justified because justification at narrow column widths (252pt
+      // here) creates visible word-space rivers, and trade-book convention
+      // for this paragraph is overwhelmingly centered or left-aligned \u2014
+      // almost never justified.
       doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
       const copyrightLine = "Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
@@ -2101,7 +2117,11 @@
       copBlockH += 18;
       copBlockH += copLines.length * 13;
       if (bookData.isbn) copBlockH += 10 + 13;
-      ty = Math.max(80, (SPEC.pageH - copBlockH) * 0.45);
+      // Bottom-align: position the block so its last line sits 45pt above
+      // the page bottom edge \u2014 enough clearance to breathe but firmly in
+      // the lower portion of the page.
+      const COPYRIGHT_BOTTOM_CLEARANCE = 45;
+      ty = Math.max(120, SPEC.pageH - COPYRIGHT_BOTTOM_CLEARANCE - copBlockH);
       if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
       doc.text(copyrightLine, getCenterX(), ty, { align: "center" }); ty += 18;
       for (const line of copLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 13; }
@@ -3022,7 +3042,13 @@
         // page in e-readers that honour viewport height. Matches the PDF
         // convention (Chicago Manual / KDP / IngramSpark) of centering
         // these front-matter pages rather than top-aligning them.
-        'div.dedication-page, div.copyright-page { display: flex; flex-direction: column; justify-content: center; min-height: 90vh; padding: 0 2em; }',
+        // Dedication centers (Chicago / Penguin Random House style).
+        // Copyright bottom-aligns (Chicago §1.20-1.21, Hart's Rules, KDP / IngramSpark
+        // style) — copyright pages traditionally sit at the foot of the page,
+        // not the middle. 6vh bottom padding gives breathing room from the
+        // page edge so the block doesn't kiss the bottom margin.
+        'div.dedication-page { display: flex; flex-direction: column; justify-content: center; min-height: 90vh; padding: 0 2em; }',
+        'div.copyright-page { display: flex; flex-direction: column; justify-content: flex-end; min-height: 90vh; padding: 0 2em 6vh; }',
         'div.title-page { text-align: center; margin-top: 5em; page-break-before: always; break-before: page; }',
         'div.title-page h1 { font-size: 2.4em; page-break-before: auto; break-before: auto; }',
         'div.title-page .subtitle { font-style: italic; font-size: 1.2em; margin: 1em 2em; }',
