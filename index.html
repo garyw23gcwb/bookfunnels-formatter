@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.7",
+      version: "0.13.8",
       date: "2026-05-18",
       changes: [
+        "0.13.8 - Tables that span more than one page now break correctly. Previously jspdf-autotable was running with its default page-break options, which allow a single row to be split mid-cell across pages — orphaning content like 'Low CTR but some' on one page and 'purchases' (the rest of that same cell) on the next. That violates every trade-book typography standard (Chicago Manual of Style, New Hart's Rules / Oxford, Bringhurst, IngramSpark / KDP imposition guidelines): rows are atomic, and breaks land at row boundaries only. Fix is three autotable options applied in buildAutoTableOptions: pageBreak:'avoid' tries to keep the whole table together (short tables that don't fit on the current page move whole to the next page); rowPageBreak:'avoid' makes any unavoidable break land between rows, never within one; showHead:'everyPage' repeats the bold header row on each continuation page so the reader always has column context. The pass-1 dry-run uses the same options so the TOC page counts stay accurate. No change to short tables that already fit on one page — they render identically to v0.13.7.",
         "0.13.7 - Step 4 preview thumbnail no longer hard-cuts content at the bottom of the page frame. With tables and multiple paragraphs the rendered content can overflow the 220x352 box (which is intentional — that ratio matches a real 5x8 book page, and a real page is bounded too). Previously the overflow:hidden produced an abrupt mid-line clip that looked broken. Added a 44pt white linear-gradient overlay at the bottom edge that fades the last lines out smoothly so the cropping reads as 'this is a thumbnail of one page' instead of 'something rendered wrong'. Overlay uses pointer-events:none so it doesn't intercept clicks.",
         "0.13.6 - Step 4 preview thumbnail now actually renders markdown tables as tables (was still showing them as raw markdown after 0.13.5). Root cause: 0.13.5 split the body with the naïve .split(/\\n\\s*\\n/) + .replace(/\\n/g, ' ') pattern lifted from prose-paragraph handling. That collapses the row newlines INSIDE a table to spaces, so the table classifier (which needs newlines between rows to recognize the | header | / |---|---| / | cell | structure) never saw a real table and the block fell through to plain prose rendering. Fix: PagePreview now uses splitChapterBody() — the existing helper that preserves row newlines for tables and promotes scene-break ornaments to their own paragraph — and pipes each chunk through classifyParagraph(), the same classifier the PDF and EPUB renderers use. Tables in the thumbnail now appear as actual mini <table>s. Also added a placeholder for image blocks ([image]) so they no longer appear blank.",
         "0.13.5 - Step 4 page preview thumbnail now actually previews the rendered output instead of dumping raw chapter body text. Previously the preview pane sliced `ch.body.slice(0, 350)` and rendered it as one flat string, so markdown markers (**bold**, *italic*, __underline__) and entire markdown tables (| Step | Action | ... | rows) showed up as literal text — visually identical to the editor textarea and easily mistaken by the user for what the PDF would look like. New preview: paragraphs are split the same way the PDF / EPUB renderers split them, each block is classified (table / scene break / H2 / H3 / prose) using the same helpers the real renderers use (looksLikeMarkdownTable, parseMarkdownTable, isSectionBreak, parseAlignment), and rendered as actual mini HTML elements — markdown tables become small <table>s with bold grey-filled headers, H2 / H3 render as bold larger text, scene breaks become centered '* * *' ornaments, inline **/*/__/*** markers become real <strong> / <em> / <u> / <strong><em> tags. Drop cap still applies to the first prose paragraph (skips headings and tables, matching the PDF). Capped at 7 blocks total and table rows trimmed to 5 so the thumbnail stays inside its 220 × 352 frame. Uses inlineMarkdownToHtml under React's dangerouslySetInnerHTML — content is HTML-escaped before markers are converted, so user-pasted '<script>' tags remain inert.",
@@ -887,6 +888,22 @@
         body: rows,
         margin: tableMargin,
         tableWidth: textW,
+        // Trade-book table page-break convention (Chicago / New Hart's /
+        // Bringhurst / IngramSpark): short tables move whole to the next
+        // page when they don't fit, long tables break across pages but
+        // NEVER mid-row, and the header row repeats on every continuation
+        // page so the reader always has column context.
+        //   pageBreak:    'avoid'      → try to keep the whole table
+        //                                together; only break if it's
+        //                                physically longer than one page.
+        //   rowPageBreak: 'avoid'      → if a break IS unavoidable, it
+        //                                must land between rows. A single
+        //                                row is never split.
+        //   showHead:     'everyPage'  → the header row repeats at the
+        //                                top of each continuation page.
+        pageBreak: "avoid",
+        rowPageBreak: "avoid",
+        showHead: "everyPage",
         columnStyles: columnStyles,
         styles: {
           font: "helvetica", // overridden in pass 2 once fonts are loaded
