@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.13",
+      version: "0.13.14",
       date: "2026-05-18",
       changes: [
+        "0.13.14 - Copyright page layout reworked. (1) Bigger gap (35pt instead of 20pt) between 'PUBLISHED BY ...' and the 'Copyright © YYYY by ...' line so the publisher imprint reads as its own item rather than crowding the copyright statement. (2) The long 'All rights reserved' paragraph is now LEFT-ALIGNED AND JUSTIFIED at the full text-column width — same justified path the body chapter text uses (breakIntoJustifiedLines + drawJustifiedLine), with the last line ragged-right per industry convention. Single-line items (publisher, copyright statement, ISBN) stay centered as before. (3) Extra breathing room (18pt instead of 10pt) before the ISBN line. (4) Bottom clearance increased from 80pt to 100pt (about 1.4 inches on the 5x8 page) — the block now sits comfortably in the lower portion rather than near the edge. EPUB matches: new p.copyright-block class for justified left-aligned paragraph, p.copyright-publisher for extra bottom margin under the publisher imprint, p.copyright-isbn for top margin above ISBN. div.copyright-page padding-bottom raised to match.",
         "0.13.13 - Copyright block clearance from the bottom edge increased from 45pt to 80pt (about 1.1\" on the 5x8 page). Well-typeset trade books (Penguin, Knopf, HarperCollins) sit the copyright block roughly 1 to 1.25 inches above the bottom edge — firmly in the lower third with breathing room — not jammed against the bottom margin. 45pt was technically 'at the bottom' but the block extended past the page-number zone (y=546) and read as 'ran out of room' rather than deliberate placement. 80pt sits the block in the lower third where readers expect publication details. EPUB copyright-page padding-bottom raised from 6vh to 12vh to match.",
         "0.13.12 - Copyright paragraph no longer pinched. Wrap width changed from getTextWidth() - 40 (212pt) to getTextWidth() (252pt) — the full text column. The -40 inset was a holdover with no convention behind it; it forced the 'All rights reserved...' paragraph into about seven narrow lines and made the bottom-aligned block look awkward. Trade-book convention (Chicago Manual, Penguin Random House, O'Reilly style) is to set the copyright paragraph at the same measure as the body text. The paragraph now flows in about four well-balanced lines, the block height drops by ~26pt, and the bottom anchor is unchanged so the block still ends 45pt above the page edge.",
         "0.13.11 - Title and copyright page positioning corrected to match trade-book industry standard. (1) Title page: title block shifted down from ty=140 to ty=180 so the title's cap-top now lands at ~28% from the page top instead of ~20%, giving the breathing room above the title that Bringhurst and Chicago Manual §1.18-1.19 both call for. Author position unchanged (~75% down). (2) Copyright page: was vertically centered with a 0.45 upper bias (v0.12.7 — based on incomplete research). The actual consistent convention across Chicago Manual §1.20-1.21, the University of Chicago Press style sheet, Penguin Random House house style, New Hart's Rules, and the KDP / IngramSpark self-publishing guidelines is BOTTOM of the page. Block is now bottom-aligned with 45pt clearance from the page edge, putting it in the lower fifth of the page where readers expect to find publication details. (3) EPUB copyright-page CSS switched from justify-content:center to justify-content:flex-end with 6vh padding-bottom so Apple Books / Kobo / Kindle render the same bottom-aligned layout. Dedication CSS still center-aligned — that's a separate convention and was already correct. (4) Copyright block stays centered, not justified. Justification at narrow column widths (252pt) creates word-space rivers, and trade-book convention for the 'All rights reserved' paragraph is overwhelmingly centered (sometimes left-aligned in a narrow column) — almost never justified. Added comments documenting all three convention citations so future versions don't re-litigate.",
@@ -2095,50 +2096,72 @@
 
       newPage();
       // Copyright page. Trade-book convention (Chicago Manual \u00A71.20-1.21,
-      // University of Chicago Press, Penguin Random House style, New Hart's
-      // Rules, KDP / IngramSpark guidelines): the copyright statement and
-      // publication details are set NEAR THE BOTTOM of the page, not
-      // centered or in the upper portion. Earlier versions (0.12.7) centered
-      // this \u2014 that was based on a partial reading; the consistent house-
-      // style call across the trade is bottom-aligned with breathing room
-      // above and a small clearance below.
+      // University of Chicago Press, Penguin Random House, New Hart's
+      // Rules, KDP / IngramSpark guidelines): publication details set
+      // NEAR THE BOTTOM of the page \u2014 firmly in the lower third with
+      // breathing room above and below, not jammed against the bottom
+      // margin.
       //
-      // Alignment: every line of the copyright block is CENTERED. The long
-      // "All rights reserved..." paragraph is centered rather than
-      // justified because justification at narrow column widths (252pt
-      // here) creates visible word-space rivers, and trade-book convention
-      // for this paragraph is overwhelmingly centered or left-aligned \u2014
-      // almost never justified.
+      // Layout (top to bottom inside the block):
+      //   PUBLISHED BY ...         centered
+      //   [generous gap]
+      //   Copyright \u00A9 YYYY by ...   centered
+      //   [gap]
+      //   All rights reserved...    LEFT-ALIGNED + JUSTIFIED, full column
+      //   [gap]
+      //   ISBN: ...                 centered
+      //
+      // The justified paragraph uses the same breakIntoJustifiedLines +
+      // drawJustifiedLine helpers as the body text, so spacing logic and
+      // hyphenation match. The last line stays ragged-right per industry
+      // convention.
       doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9); doc.setTextColor(60);
       const copyrightLine = "Copyright \u00A9 " + new Date().getFullYear() + " by " + bookData.author;
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
-      // Use the full text column width (no extra horizontal inset). Earlier
-      // versions wrapped at getTextWidth() - 40, which pinched the long
-      // "All rights reserved" paragraph into 7 narrow lines. Trade-book
-      // convention (Chicago Manual, Penguin Random House, O'Reilly style)
-      // is to set the copyright paragraph at the same measure as the body
-      // text block.
-      const copLines = wrapText(copyrightText, getTextWidth(), 9);
-      // Total visual block height (sum of line advances).
+      // Break the long paragraph into justified lines at full text-column
+      // width. Each line is an object { tokens, lineWidth, hyphenateEnd }.
+      const copJustifiedLines = breakIntoJustifiedLines(doc, copyrightText, getTextWidth(), 9, BODY_FONT);
+
+      // Inter-element gaps (advance from one baseline to the next).
+      const COP_GAP_PUB_TO_COPY = 35;   // publisher \u2192 copyright line
+      const COP_GAP_COPY_TO_PARA = 20;  // copyright line \u2192 first para line
+      const COP_PARA_LINE_H = 13;       // between consecutive paragraph lines
+      const COP_GAP_PARA_TO_ISBN = 18;  // last para line \u2192 ISBN line
+
+      // Block extent: total advance from FIRST baseline to LAST baseline.
       let copBlockH = 0;
-      if (bookData.publisher) copBlockH += 20;
-      copBlockH += 18;
-      copBlockH += copLines.length * 13;
-      if (bookData.isbn) copBlockH += 10 + 13;
-      // Bottom-align: position the block so its last line sits ~80pt above
-      // the page bottom edge \u2014 about 1.1" of clearance on the 5x8 page,
-      // which matches what well-typeset trade books actually do (Penguin /
-      // Knopf / HarperCollins paperbacks all sit the copyright block 1 to
-      // 1.25 inches above the bottom edge). 45pt was too low \u2014 the block
-      // extended into the page-number zone and read as "ran out of room"
-      // rather than deliberate placement. 80pt sits the block firmly in
-      // the lower third without jamming the bottom margin.
-      const COPYRIGHT_BOTTOM_CLEARANCE = 80;
+      if (bookData.publisher) copBlockH += COP_GAP_PUB_TO_COPY;
+      copBlockH += COP_GAP_COPY_TO_PARA;
+      copBlockH += (copJustifiedLines.length - 1) * COP_PARA_LINE_H;
+      if (bookData.isbn) copBlockH += COP_GAP_PARA_TO_ISBN;
+
+      // Bottom clearance: ~100pt (\u22481.4"). Sits the block firmly in the
+      // lower third with comfortable breathing room \u2014 slightly more than
+      // typical Penguin / Knopf placement, which feels right for a self-
+      // published trade interior at this trim size.
+      const COPYRIGHT_BOTTOM_CLEARANCE = 100;
       ty = Math.max(120, SPEC.pageH - COPYRIGHT_BOTTOM_CLEARANCE - copBlockH);
-      if (bookData.publisher) { doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" }); ty += 20; }
-      doc.text(copyrightLine, getCenterX(), ty, { align: "center" }); ty += 18;
-      for (const line of copLines) { doc.text(line, getCenterX(), ty, { align: "center" }); ty += 13; }
-      if (bookData.isbn) { ty += 10; doc.text("ISBN: " + bookData.isbn, getCenterX(), ty, { align: "center" }); }
+
+      if (bookData.publisher) {
+        doc.text("PUBLISHED BY " + bookData.publisher.toUpperCase(), getCenterX(), ty, { align: "center" });
+        ty += COP_GAP_PUB_TO_COPY;
+      }
+      doc.text(copyrightLine, getCenterX(), ty, { align: "center" });
+      ty += COP_GAP_COPY_TO_PARA;
+
+      // Justified paragraph \u2014 left-aligned at the text-column edge,
+      // inter-word spaces stretched to fill the column, last line ragged.
+      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(9);
+      for (let li = 0; li < copJustifiedLines.length; li++) {
+        const isLast = li === copJustifiedLines.length - 1;
+        drawJustifiedLine(doc, copJustifiedLines[li], getTextX(), ty, getTextWidth(), isLast);
+        if (!isLast) ty += COP_PARA_LINE_H;
+      }
+
+      if (bookData.isbn) {
+        ty += COP_GAP_PARA_TO_ISBN;
+        doc.text("ISBN: " + bookData.isbn, getCenterX(), ty, { align: "center" });
+      }
       doc.setTextColor(30);
 
       if (bookData.dedication) {
@@ -3050,7 +3073,16 @@
         // class handles this case so we do not put page-break-before on every h1.
         'h1.chapter-opener { page-break-before: always; break-before: page; }',
         'p.dedication { font-style: italic; text-align: center; margin: 1em 2em; }',
+        // Single-line copyright items (publisher, copyright statement,
+        // ISBN) stay centered. The long "All rights reserved" paragraph
+        // gets its own class so it can be set left-aligned + justified,
+        // matching the PDF layout. Gaps below the publisher line and
+        // above the ISBN line are slightly larger so the four elements
+        // read as four distinct items rather than a single dense block.
         'p.copyright { font-size: 0.85em; text-align: center; margin: 0.3em 0; }',
+        'p.copyright.copyright-publisher { margin-bottom: 1.8em; }',
+        'p.copyright-block { font-size: 0.85em; text-align: justify; margin: 1em 0; }',
+        'p.copyright-isbn { font-size: 0.85em; text-align: center; margin-top: 1.5em; }',
         // Vertically center the dedication and copyright blocks on the
         // page in e-readers that honour viewport height. Matches the PDF
         // convention (Chicago Manual / KDP / IngramSpark) of centering
@@ -3113,11 +3145,15 @@
       // 6. Copyright page \u2014 wrapped in copyright-page container so the
       // viewport-height flex centering in styles.css can take over.
       let copyBody = '<div class="copyright-page">\n';
-      if (bookData.publisher) copyBody += '  <p class="copyright">PUBLISHED BY ' + esc(bookData.publisher.toUpperCase()) + '</p>\n';
+      // PUBLISHED BY ... \u2014 extra bottom margin (handled by copyright-publisher class)
+      if (bookData.publisher) copyBody += '  <p class="copyright copyright-publisher">PUBLISHED BY ' + esc(bookData.publisher.toUpperCase()) + '</p>\n';
+      // Copyright statement \u2014 centered
       copyBody += '  <p class="copyright">Copyright \u00A9 ' + new Date().getFullYear() + ' by ' + esc(bookData.author) + '</p>\n';
+      // "All rights reserved..." \u2014 left-aligned + justified (own class)
       const copyrightText = bookData.copyrightText || "All rights reserved. Without limiting the rights under copyright reserved above, no part of this book may be reproduced, stored, or introduced into a retrieval system, or transmitted, in any form or by any means (electronic, mechanical, photocopying, recording or otherwise), without the prior written permission of both the copyright owner and the publisher.";
-      copyBody += '  <p class="copyright">' + esc(copyrightText) + '</p>\n';
-      if (bookData.isbn) copyBody += '  <p class="copyright">ISBN: ' + esc(bookData.isbn) + '</p>\n';
+      copyBody += '  <p class="copyright-block">' + esc(copyrightText) + '</p>\n';
+      // ISBN \u2014 centered, with bit more space above
+      if (bookData.isbn) copyBody += '  <p class="copyright copyright-isbn">ISBN: ' + esc(bookData.isbn) + '</p>\n';
       copyBody += '</div>';
       oebps.file("copyright.xhtml", xhtmlDoc("Copyright", copyBody));
 
