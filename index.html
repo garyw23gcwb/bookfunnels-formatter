@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.3",
-      date: "2026-05-14",
+      version: "0.13.4",
+      date: "2026-05-18",
       changes: [
+        "0.13.4 - Bold / italic markers inside table cells no longer leak as literal asterisks. v0.13.3 made Word tables come through as proper markdown tables, but Word bolds its header rows, so the paste handler wrapped each header cell in **...** — and both renderers (jspdf-autotable for the PDF, <td> emission for the EPUB) shipped that raw text to the page. Two fixes: (1) PDF — new formatTableCellForAutoTable() pre-processes every cell on its way into autotable. Whole-cell **bold** / *italic* / ***bolditalic*** becomes a real autotable cell-object with styles.fontStyle set to the right weight, so the cell renders bold / italic / bold-italic instead of showing the markers. Cells with partial inline emphasis collapse to plain text (autotable can't paint mixed styles inside one cell, and shipping literal asterisks is worse than losing the emphasis). __underline__ also degrades to plain text since 'underline' isn't an autotable fontStyle. (2) EPUB — the table HTML emitter now runs cell content through inlineMarkdownToHtml() instead of bare esc(), so **bold**, *italic*, __underline__, and ***bolditalic*** in cells become <strong>, <em>, <u>, <strong><em> tags that Apple Books / Kobo / Kindle render correctly. New helper flattenInlineMarkdown() is shared by both paths.",
         "0.13.3 - Paste-from-Word tables work again. Regression from 0.13.0: the new htmlToMarkdownLite() reads the clipboard's text/html payload but had no case for <table>, so Word / Docs / Pages tables were flattened to a single run of cell text with no rows or columns. The plain-text fallback (which routes through tryConvertTabularToMarkdown and would have produced a proper markdown table from the tab-separated payload) only fired when the HTML reduced to nothing, and 'all the cell text concatenated' isn't nothing — so it never triggered. Fix: htmlToMarkdownLite now has a dedicated <table> branch that walks <tr>/<td>/<th> and emits the `| header | header |` + `|---|---|` + `| cell | cell |` markdown table syntax that parseMarkdownTable already understands. Direct-child filtering on <tr> and <td> so nested tables don't get double-walked. Cells are walked recursively, so bold / italic / underline inside a cell still survive the round trip. Mixed pastes (a Word selection that includes prose AROUND a table) now work too — the prose comes through as paragraphs and the table comes through as a real table.",
         "0.13.2 - Bold + italic combined (***text***) now renders correctly, AND EPUB output finally honours inline markdown markers. Two related fixes: (1) parseInlineRuns previously didn't recognise the triple-asterisk form — it greedy-matched the first **...** which left a stray * inside the bold run and another * after it; the user saw '*The Myth and the Mountain*' rendered in bold instead of bold-italic. New branch in parseInlineRuns detects ***...*** as its own 'bolditalic' style, checked BEFORE the ** rule so the triple form wins. pdfStyleFor maps bolditalic → 'bolditalic' which jsPDF picks up via a newly-loaded Gelasio 700-italic font variant (4th font in loadFontsForPDF). (2) The EPUB chapter renderer was escaping body text without parsing the markdown markers — Apple Books / Kobo / Kindle were showing literal **asterisks** and __underscores__ in the rendered output. New helper inlineMarkdownToHtml() converts the four markers to <strong> / <em> / <u> / <strong><em> HTML tags, applied to body paragraphs AND h2 / h3 headings. The PDF and the EPUB now produce consistent inline formatting.",
         "0.13.1 - Reader Bonus body text bumped from SPEC.bodySize to SPEC.bodySize + 2 (Default 10pt body → 12pt CTA body; Spacious 11pt → 13pt). The CTA body is short marketing-style copy on a destination page, not running narrative, so it benefits from a bit more presence than the chapter body — easier to scan from across the room. Line-height keeps the same ratio to font size that the chapter body uses, so the rhythm stays consistent. EPUB cta-body lifted from 1em to 1.2em to match.",
@@ -815,6 +816,39 @@
       return { headers: headers, rows: rows, alignments: alignments };
     }
 
+    // Strip inline markdown markers from a string and return the underlying
+    // plain text. Used for table cells where the renderer (jspdf-autotable
+    // for PDF; HTML <td> for EPUB) doesn't support mixed inline styles
+    // within a single cell — partial emphasis collapses to plain text so we
+    // never ship literal "**asterisks**" to the rendered output.
+    function flattenInlineMarkdown(text) {
+      return parseInlineRuns(String(text == null ? "" : text))
+        .map(function(r) { return r.text; })
+        .join("");
+    }
+
+    // Convert a markdown table cell into the form jspdf-autotable expects.
+    // If the WHOLE cell is wrapped in ***bolditalic***, **bold**, or *italic*
+    // (which is what our paste-from-Word handler emits when an entire cell
+    // had a uniform Word style), return a cell-object with the matching
+    // autotable fontStyle so the cell renders in the right weight. Otherwise
+    // return a plain string with any inline markers stripped — autotable
+    // can't paint mixed styles inside one cell, and shipping literal
+    // asterisks to the PDF is the failure mode we are fixing. Underline
+    // isn't an autotable fontStyle, so __underlined__ whole-cell content
+    // also degrades to plain text.
+    function formatTableCellForAutoTable(rawCell) {
+      const s = String(rawCell == null ? "" : rawCell);
+      let m;
+      m = s.match(/^\s*\*\*\*([\s\S]+?)\*\*\*\s*$/);
+      if (m) return { content: flattenInlineMarkdown(m[1]), styles: { fontStyle: "bolditalic" } };
+      m = s.match(/^\s*\*\*([\s\S]+?)\*\*\s*$/);
+      if (m) return { content: flattenInlineMarkdown(m[1]), styles: { fontStyle: "bold" } };
+      m = s.match(/^\s*\*([^*]+?)\*\s*$/);
+      if (m) return { content: flattenInlineMarkdown(m[1]), styles: { fontStyle: "italic" } };
+      return flattenInlineMarkdown(s);
+    }
+
     // Build the jspdf-autotable options object for a parsed markdown table,
     // anchored to our text column and styled to match the rest of the book.
     // Used by both the pass-1 dry-run (measure on a temp doc) and pass 2
@@ -837,10 +871,17 @@
       // Header row is bolded, light-gray filled, and slightly more padded
       // than body cells to read as a header.
       const tableFontSize = SPEC.bodySize * 0.9;
+      // Process every cell through formatTableCellForAutoTable so whole-cell
+      // bold / italic / bold-italic markers become real autotable fontStyle
+      // overrides instead of literal asterisks in the rendered PDF.
+      const headers = (table.headers || []).map(formatTableCellForAutoTable);
+      const rows = (table.rows || []).map(function(row) {
+        return row.map(formatTableCellForAutoTable);
+      });
       return {
         startY: startY,
-        head: [table.headers],
-        body: table.rows,
+        head: [headers],
+        body: rows,
         margin: tableMargin,
         tableWidth: textW,
         columnStyles: columnStyles,
@@ -3043,14 +3084,14 @@
               let tableHtml = '  <table class="md-table">\n    <thead>\n      <tr>';
               for (let ci2 = 0; ci2 < table.headers.length; ci2++) {
                 const align = (table.alignments[ci2] || "left");
-                tableHtml += '<th style="text-align:' + align + '">' + esc(table.headers[ci2]) + '</th>';
+                tableHtml += '<th style="text-align:' + align + '">' + inlineMarkdownToHtml(table.headers[ci2], esc) + '</th>';
               }
               tableHtml += '</tr>\n    </thead>\n    <tbody>\n';
               for (const row of table.rows) {
                 tableHtml += '      <tr>';
                 for (let ci2 = 0; ci2 < row.length; ci2++) {
                   const align = (table.alignments[ci2] || "left");
-                  tableHtml += '<td style="text-align:' + align + '">' + esc(row[ci2]) + '</td>';
+                  tableHtml += '<td style="text-align:' + align + '">' + inlineMarkdownToHtml(row[ci2], esc) + '</td>';
                 }
                 tableHtml += '</tr>\n';
               }
