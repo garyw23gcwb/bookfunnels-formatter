@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.8",
+      version: "0.13.9",
       date: "2026-05-18",
       changes: [
+        "0.13.9 - Two trade-book typography conventions for tables (Chicago Manual of Style / New Hart's Rules / Bringhurst). (1) Numeric columns auto-right-align. New helper computeEffectiveAlignments() walks each column's body cells (excluding the header — '2024' shouldn't make a column numeric on its own) and right-aligns the column when at least 70% of non-empty cells parse as numeric: integers, decimals, thousands-separated, currency-prefixed (€$£¥), percentages, accounting parentheses. NUMERIC_CELL_RE handles all of '42', '1,250', '$1,250.00', '12.5%', '(3.20)', '-5'. Columns the writer explicitly set to center or right via the markdown :---:/:---/---: separator are left alone; only the default-left case gets the auto-detect. (2) Empty cells render as em-dash so they don't read as missing data. Applied at the cell-formatting level in formatTableCellForAutoTable (PDF), the cellHtml helper in the EPUB chapter renderer, and in the Step 4 preview thumbnail's table rendering, so all three outputs are consistent. The em-dash check runs first, so even **__** (whole-cell bold wrapping a blank) flattens to an em-dash rather than a styled empty cell.",
         "0.13.8 - Tables that span more than one page now break correctly. Previously jspdf-autotable was running with its default page-break options, which allow a single row to be split mid-cell across pages — orphaning content like 'Low CTR but some' on one page and 'purchases' (the rest of that same cell) on the next. That violates every trade-book typography standard (Chicago Manual of Style, New Hart's Rules / Oxford, Bringhurst, IngramSpark / KDP imposition guidelines): rows are atomic, and breaks land at row boundaries only. Fix is three autotable options applied in buildAutoTableOptions: pageBreak:'avoid' tries to keep the whole table together (short tables that don't fit on the current page move whole to the next page); rowPageBreak:'avoid' makes any unavoidable break land between rows, never within one; showHead:'everyPage' repeats the bold header row on each continuation page so the reader always has column context. The pass-1 dry-run uses the same options so the TOC page counts stay accurate. No change to short tables that already fit on one page — they render identically to v0.13.7.",
         "0.13.7 - Step 4 preview thumbnail no longer hard-cuts content at the bottom of the page frame. With tables and multiple paragraphs the rendered content can overflow the 220x352 box (which is intentional — that ratio matches a real 5x8 book page, and a real page is bounded too). Previously the overflow:hidden produced an abrupt mid-line clip that looked broken. Added a 44pt white linear-gradient overlay at the bottom edge that fades the last lines out smoothly so the cropping reads as 'this is a thumbnail of one page' instead of 'something rendered wrong'. Overlay uses pointer-events:none so it doesn't intercept clicks.",
         "0.13.6 - Step 4 preview thumbnail now actually renders markdown tables as tables (was still showing them as raw markdown after 0.13.5). Root cause: 0.13.5 split the body with the naïve .split(/\\n\\s*\\n/) + .replace(/\\n/g, ' ') pattern lifted from prose-paragraph handling. That collapses the row newlines INSIDE a table to spaces, so the table classifier (which needs newlines between rows to recognize the | header | / |---|---| / | cell | structure) never saw a real table and the block fell through to plain prose rendering. Fix: PagePreview now uses splitChapterBody() — the existing helper that preserves row newlines for tables and promotes scene-break ornaments to their own paragraph — and pipes each chunk through classifyParagraph(), the same classifier the PDF and EPUB renderers use. Tables in the thumbnail now appear as actual mini <table>s. Also added a placeholder for image blocks ([image]) so they no longer appear blank.",
@@ -831,6 +832,46 @@
         .join("");
     }
 
+    // Matches a "numeric-looking" cell: optional accounting parenthesis,
+    // optional currency symbol, optional sign, digits with optional comma
+    // thousands separators, optional decimal part, optional percent sign.
+    //   Yes:  42   1,250   1.5   $1,250.00   -5   12.5%   (3.20)
+    //   No:   abc  $1,2    1.2.3                 (malformed)
+    const NUMERIC_CELL_RE = /^\s*\(?\s*[$£€¥]?\s*-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[%\)]?\s*$/;
+
+    // Compute the effective horizontal alignment per column. Starts from the
+    // markdown table's explicit `:---:` markers and, for columns left at the
+    // default ("left"), sniffs the body cells — if at least 70% of non-empty
+    // cells parse as numeric, right-align that column. Trade-book convention
+    // (Chicago / New Hart's / Bringhurst): text left, numbers right. Columns
+    // the writer set to center or right explicitly are left untouched.
+    // Header cells are NOT included in the sniff (a header like "2024" or
+    // "Q1" shouldn't make the column register as numeric on its own).
+    function computeEffectiveAlignments(table) {
+      const cols = (table.headers || []).length;
+      const result = [];
+      for (let i = 0; i < cols; i++) {
+        const explicit = (table.alignments || [])[i];
+        if (explicit === "center" || explicit === "right") {
+          result.push(explicit);
+          continue;
+        }
+        let scored = 0, numeric = 0;
+        for (const row of (table.rows || [])) {
+          const raw = row[i] == null ? "" : String(row[i]);
+          const plain = flattenInlineMarkdown(raw).trim();
+          // Skip cells that have no real content — they shouldn't sway the
+          // sniff one way or the other.
+          if (plain === "" || plain === "—" || plain === "-") continue;
+          scored++;
+          if (NUMERIC_CELL_RE.test(plain)) numeric++;
+        }
+        if (scored >= 1 && numeric / scored >= 0.7) result.push("right");
+        else result.push("left");
+      }
+      return result;
+    }
+
     // Convert a markdown table cell into the form jspdf-autotable expects.
     // If the WHOLE cell is wrapped in ***bolditalic***, **bold**, or *italic*
     // (which is what our paste-from-Word handler emits when an entire cell
@@ -843,6 +884,11 @@
     // also degrades to plain text.
     function formatTableCellForAutoTable(rawCell) {
       const s = String(rawCell == null ? "" : rawCell);
+      // Trade-book convention (Chicago / New Hart's): blank cells render
+      // as an em-dash so they don't read as missing data. Done first so
+      // whole-cell bold/italic markers wrapping an empty string also fall
+      // through to the em-dash.
+      if (flattenInlineMarkdown(s).trim() === "") return "—";
       let m;
       m = s.match(/^\s*\*\*\*([\s\S]+?)\*\*\*\s*$/);
       if (m) return { content: flattenInlineMarkdown(m[1]), styles: { fontStyle: "bolditalic" } };
@@ -864,8 +910,12 @@
         right: SPEC.pageW - (textX + textW),
         top: bodyTopYValue,
       };
+      // Effective alignment per column: honours explicit center / right
+      // markdown markers, and for columns the writer left at the default
+      // (left) auto-right-aligns when the body cells are mostly numeric.
+      const effAlign = computeEffectiveAlignments(table);
       const columnStyles = {};
-      (table.alignments || []).forEach(function(a, i) {
+      effAlign.forEach(function(a, i) {
         columnStyles[i] = { halign: a };
       });
       // Trade-book table typography (per Bringhurst): table text sits 1-2pt
@@ -3101,17 +3151,29 @@
           if (looksLikeMarkdownTable(p)) {
             const table = parseMarkdownTable(p);
             if (table) {
+              // Same per-column alignment logic as the PDF: respect
+              // explicit markers, auto-right-align numeric columns.
+              const effAlign = computeEffectiveAlignments(table);
+              // Helper for cell content: empty cells become an em-dash so
+              // they don't read as missing data; everything else routes
+              // through inlineMarkdownToHtml so **bold** / *italic* / __u__
+              // markers inside cells render as real <strong> / <em> / <u>.
+              const cellHtml = function(cell) {
+                const raw = cell == null ? "" : String(cell);
+                if (flattenInlineMarkdown(raw).trim() === "") return "&#8212;";
+                return inlineMarkdownToHtml(raw, esc);
+              };
               let tableHtml = '  <table class="md-table">\n    <thead>\n      <tr>';
               for (let ci2 = 0; ci2 < table.headers.length; ci2++) {
-                const align = (table.alignments[ci2] || "left");
-                tableHtml += '<th style="text-align:' + align + '">' + inlineMarkdownToHtml(table.headers[ci2], esc) + '</th>';
+                const align = effAlign[ci2] || "left";
+                tableHtml += '<th style="text-align:' + align + '">' + cellHtml(table.headers[ci2]) + '</th>';
               }
               tableHtml += '</tr>\n    </thead>\n    <tbody>\n';
               for (const row of table.rows) {
                 tableHtml += '      <tr>';
                 for (let ci2 = 0; ci2 < row.length; ci2++) {
-                  const align = (table.alignments[ci2] || "left");
-                  tableHtml += '<td style="text-align:' + align + '">' + inlineMarkdownToHtml(row[ci2], esc) + '</td>';
+                  const align = effAlign[ci2] || "left";
+                  tableHtml += '<td style="text-align:' + align + '">' + cellHtml(row[ci2]) + '</td>';
                 }
                 tableHtml += '</tr>\n';
               }
@@ -3921,12 +3983,20 @@
               {blocks.map(function(blk, idx) {
                 if (blk.type === "table") {
                   const t = blk.table;
+                  // Same numeric-column / em-dash logic the PDF and EPUB use,
+                  // so the thumbnail matches the final output.
+                  const effAlign = computeEffectiveAlignments(t);
+                  const cellMd = function(cell) {
+                    const raw = cell == null ? "" : String(cell);
+                    if (flattenInlineMarkdown(raw).trim() === "") return { __html: "&mdash;" };
+                    return md(raw);
+                  };
                   return (
                     <table key={idx} style={{ width: "100%", borderCollapse: "collapse", margin: "4px 0", fontSize: 5.5, lineHeight: 1.25 }}>
                       <thead>
                         <tr>
                           {t.headers.map(function(h, i) {
-                            return <th key={i} style={{ border: "0.4px solid #aaa", background: "#f0f0f0", fontWeight: 700, padding: "2px 3px", textAlign: (t.alignments[i] || "left"), color: "#222" }} dangerouslySetInnerHTML={md(h)} />;
+                            return <th key={i} style={{ border: "0.4px solid #aaa", background: "#f0f0f0", fontWeight: 700, padding: "2px 3px", textAlign: (effAlign[i] || "left"), color: "#222" }} dangerouslySetInnerHTML={cellMd(h)} />;
                           })}
                         </tr>
                       </thead>
@@ -3935,7 +4005,7 @@
                           return (
                             <tr key={ri}>
                               {row.map(function(cell, ci) {
-                                return <td key={ci} style={{ border: "0.4px solid #ccc", padding: "2px 3px", textAlign: (t.alignments[ci] || "left") }} dangerouslySetInnerHTML={md(cell)} />;
+                                return <td key={ci} style={{ border: "0.4px solid #ccc", padding: "2px 3px", textAlign: (effAlign[ci] || "left") }} dangerouslySetInnerHTML={cellMd(cell)} />;
                               })}
                             </tr>
                           );
