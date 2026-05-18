@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.4",
+      version: "0.13.5",
       date: "2026-05-18",
       changes: [
+        "0.13.5 - Step 4 page preview thumbnail now actually previews the rendered output instead of dumping raw chapter body text. Previously the preview pane sliced `ch.body.slice(0, 350)` and rendered it as one flat string, so markdown markers (**bold**, *italic*, __underline__) and entire markdown tables (| Step | Action | ... | rows) showed up as literal text — visually identical to the editor textarea and easily mistaken by the user for what the PDF would look like. New preview: paragraphs are split the same way the PDF / EPUB renderers split them, each block is classified (table / scene break / H2 / H3 / prose) using the same helpers the real renderers use (looksLikeMarkdownTable, parseMarkdownTable, isSectionBreak, parseAlignment), and rendered as actual mini HTML elements — markdown tables become small <table>s with bold grey-filled headers, H2 / H3 render as bold larger text, scene breaks become centered '* * *' ornaments, inline **/*/__/*** markers become real <strong> / <em> / <u> / <strong><em> tags. Drop cap still applies to the first prose paragraph (skips headings and tables, matching the PDF). Capped at 7 blocks total and table rows trimmed to 5 so the thumbnail stays inside its 220 × 352 frame. Uses inlineMarkdownToHtml under React's dangerouslySetInnerHTML — content is HTML-escaped before markers are converted, so user-pasted '<script>' tags remain inert.",
         "0.13.4 - Bold / italic markers inside table cells no longer leak as literal asterisks. v0.13.3 made Word tables come through as proper markdown tables, but Word bolds its header rows, so the paste handler wrapped each header cell in **...** — and both renderers (jspdf-autotable for the PDF, <td> emission for the EPUB) shipped that raw text to the page. Two fixes: (1) PDF — new formatTableCellForAutoTable() pre-processes every cell on its way into autotable. Whole-cell **bold** / *italic* / ***bolditalic*** becomes a real autotable cell-object with styles.fontStyle set to the right weight, so the cell renders bold / italic / bold-italic instead of showing the markers. Cells with partial inline emphasis collapse to plain text (autotable can't paint mixed styles inside one cell, and shipping literal asterisks is worse than losing the emphasis). __underline__ also degrades to plain text since 'underline' isn't an autotable fontStyle. (2) EPUB — the table HTML emitter now runs cell content through inlineMarkdownToHtml() instead of bare esc(), so **bold**, *italic*, __underline__, and ***bolditalic*** in cells become <strong>, <em>, <u>, <strong><em> tags that Apple Books / Kobo / Kindle render correctly. New helper flattenInlineMarkdown() is shared by both paths.",
         "0.13.3 - Paste-from-Word tables work again. Regression from 0.13.0: the new htmlToMarkdownLite() reads the clipboard's text/html payload but had no case for <table>, so Word / Docs / Pages tables were flattened to a single run of cell text with no rows or columns. The plain-text fallback (which routes through tryConvertTabularToMarkdown and would have produced a proper markdown table from the tab-separated payload) only fired when the HTML reduced to nothing, and 'all the cell text concatenated' isn't nothing — so it never triggered. Fix: htmlToMarkdownLite now has a dedicated <table> branch that walks <tr>/<td>/<th> and emits the `| header | header |` + `|---|---|` + `| cell | cell |` markdown table syntax that parseMarkdownTable already understands. Direct-child filtering on <tr> and <td> so nested tables don't get double-walked. Cells are walked recursively, so bold / italic / underline inside a cell still survive the round trip. Mixed pastes (a Word selection that includes prose AROUND a table) now work too — the prose comes through as paragraphs and the table comes through as a real table.",
         "0.13.2 - Bold + italic combined (***text***) now renders correctly, AND EPUB output finally honours inline markdown markers. Two related fixes: (1) parseInlineRuns previously didn't recognise the triple-asterisk form — it greedy-matched the first **...** which left a stray * inside the bold run and another * after it; the user saw '*The Myth and the Mountain*' rendered in bold instead of bold-italic. New branch in parseInlineRuns detects ***...*** as its own 'bolditalic' style, checked BEFORE the ** rule so the triple form wins. pdfStyleFor maps bolditalic → 'bolditalic' which jsPDF picks up via a newly-loaded Gelasio 700-italic font variant (4th font in loadFontsForPDF). (2) The EPUB chapter renderer was escaping body text without parsing the markdown markers — Apple Books / Kobo / Kindle were showing literal **asterisks** and __underscores__ in the rendered output. New helper inlineMarkdownToHtml() converts the four markers to <strong> / <em> / <u> / <strong><em> HTML tags, applied to body paragraphs AND h2 / h3 headings. The PDF and the EPUB now produce consistent inline formatting.",
@@ -3858,19 +3859,103 @@
     function PagePreview({ bookData, chapters }) {
       const ch = chapters[0];
       if (!ch) return null;
+
+      const serif = "'Gelasio', Georgia, serif";
+      const esc = function(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      };
+      const md = function(text) { return { __html: inlineMarkdownToHtml(text, esc) }; };
+
+      // Same paragraph splitting the PDF / EPUB renderers use, so the
+      // preview classifies blocks (table / heading / scene break / prose)
+      // the same way the final output does. Markdown markers never appear
+      // as literal text — they become real <strong> / <em> / <u> tags.
+      const paragraphs = (ch.body || "")
+        .split(/\n\s*\n/)
+        .map(function(p) { return p.replace(/\n/g, " ").trim(); })
+        .filter(Boolean);
+
+      const blocks = [];
+      let dropCapDone = false;
+      for (let i = 0; i < paragraphs.length && blocks.length < 7; i++) {
+        const p = paragraphs[i];
+        if (looksLikeMarkdownTable(p)) {
+          const t = parseMarkdownTable(p);
+          if (t) { blocks.push({ type: "table", data: t }); continue; }
+        }
+        if (isSectionBreak(p)) { blocks.push({ type: "scene" }); continue; }
+        // Strip alignment prefix (:left: / :center: / :right:) before
+        // checking for heading markers so an aligned heading still
+        // classifies correctly. Then peel off ## / ###.
+        const aligned = parseAlignment(p);
+        const text = aligned.text;
+        const align = aligned.align || "left";
+        if (/^##\s/.test(text)) { blocks.push({ type: "h2", text: text.replace(/^##\s+/, ""), align: align }); continue; }
+        if (/^###\s/.test(text)) { blocks.push({ type: "h3", text: text.replace(/^###\s+/, ""), align: align }); continue; }
+        blocks.push({ type: "p", text: text, align: align, isFirst: !dropCapDone });
+        dropCapDone = true;
+      }
+
       return (
         <div style={{ width: 220, height: 352, background: "#fff", borderRadius: 4, overflow: "hidden", flexShrink: 0, border: "1px solid " + BRAND.border, boxShadow: "0 4px 24px rgba(26,33,44,0.1)" }}>
-          <div style={{ padding: "24px 20px 16px", textAlign: "center" }}>
-            {ch.num && <div style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 9, color: "#555", marginBottom: 14 }}>{ch.num}</div>}
-            <div style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 12, fontWeight: 700, color: "#111", lineHeight: 1.3, marginBottom: 12 }}>{ch.title}</div>
-            {ch.epigraph && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 9, color: "#555", lineHeight: 1.4, marginBottom: 3 }}>&ldquo;{ch.epigraph}&rdquo;</div>}
-            {ch.epigraphAttribution && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 8, color: "#888", marginBottom: 12 }}>- {ch.epigraphAttribution}</div>}
-            {ch.body && (
-              <div style={{ textAlign: "justify" }}>
-                <span style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 20, fontWeight: 400, float: "left", lineHeight: 1, marginRight: 3, marginTop: 2, color: "#111" }}>{ch.body[0] ? ch.body[0].toUpperCase() : ""}</span>
-                <span style={{ fontFamily: "'Gelasio', Georgia, serif", fontSize: 6.5, lineHeight: 1.5, color: "#444" }}>{ch.body.slice(1, 350)}...</span>
-              </div>
-            )}
+          <div style={{ padding: "24px 16px 14px", textAlign: "center" }}>
+            {ch.num && <div style={{ fontFamily: serif, fontSize: 9, color: "#555", marginBottom: 12 }}>{ch.num}</div>}
+            <div style={{ fontFamily: serif, fontSize: 12, fontWeight: 700, color: "#111", lineHeight: 1.3, marginBottom: 10 }}>{ch.title}</div>
+            {ch.epigraph && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 9, color: "#555", lineHeight: 1.4, marginBottom: 2 }}>&ldquo;{ch.epigraph}&rdquo;</div>}
+            {ch.epigraphAttribution && <div style={{ fontFamily: "'EB Garamond', Georgia, serif", fontStyle: "italic", fontSize: 8, color: "#888", marginBottom: 10 }}>- {ch.epigraphAttribution}</div>}
+
+            <div style={{ fontFamily: serif, fontSize: 6.5, lineHeight: 1.5, color: "#444", textAlign: "left" }}>
+              {blocks.map(function(blk, idx) {
+                if (blk.type === "table") {
+                  const t = blk.data;
+                  return (
+                    <table key={idx} style={{ width: "100%", borderCollapse: "collapse", margin: "4px 0", fontSize: 5.5, lineHeight: 1.25 }}>
+                      <thead>
+                        <tr>
+                          {t.headers.map(function(h, i) {
+                            return <th key={i} style={{ border: "0.4px solid #aaa", background: "#f0f0f0", fontWeight: 700, padding: "2px 3px", textAlign: (t.alignments[i] || "left"), color: "#222" }} dangerouslySetInnerHTML={md(h)} />;
+                          })}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {t.rows.slice(0, 5).map(function(row, ri) {
+                          return (
+                            <tr key={ri}>
+                              {row.map(function(cell, ci) {
+                                return <td key={ci} style={{ border: "0.4px solid #ccc", padding: "2px 3px", textAlign: (t.alignments[ci] || "left") }} dangerouslySetInnerHTML={md(cell)} />;
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  );
+                }
+                if (blk.type === "scene") {
+                  return <div key={idx} style={{ textAlign: "center", letterSpacing: 4, padding: "3px 0", color: "#777" }}>* * *</div>;
+                }
+                if (blk.type === "h2") {
+                  return <div key={idx} style={{ fontWeight: 700, fontSize: 8, margin: "4px 0 2px", textAlign: blk.align, color: "#222" }} dangerouslySetInnerHTML={md(blk.text)} />;
+                }
+                if (blk.type === "h3") {
+                  return <div key={idx} style={{ fontWeight: 700, fontSize: 7.2, margin: "3px 0 1px", textAlign: blk.align, color: "#333" }} dangerouslySetInnerHTML={md(blk.text)} />;
+                }
+                // prose paragraph
+                const justify = blk.align === "left" ? "justify" : blk.align;
+                if (blk.isFirst) {
+                  const firstLetter = blk.text[0] ? blk.text[0].toUpperCase() : "";
+                  const rest = blk.text.slice(1, 320);
+                  return (
+                    <div key={idx} style={{ marginBottom: 3, textAlign: justify }}>
+                      <span style={{ fontFamily: serif, fontSize: 20, fontWeight: 400, float: "left", lineHeight: 1, marginRight: 3, marginTop: 2, color: "#111" }}>{firstLetter}</span>
+                      <span dangerouslySetInnerHTML={md(rest)} />
+                    </div>
+                  );
+                }
+                return <div key={idx} style={{ marginBottom: 3, textAlign: justify }} dangerouslySetInnerHTML={md(blk.text.slice(0, 260))} />;
+              })}
+            </div>
           </div>
         </div>
       );
