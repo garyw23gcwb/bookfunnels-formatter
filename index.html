@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.19",
+      version: "0.13.20",
       date: "2026-05-19",
       changes: [
+        "0.13.20 - Bulleted and numbered list items now use tighter inter-item spacing per typography convention. Confirmed first that the font size IS identical to body — both render at SPEC.bodySize (10pt default / 11pt spacious) via the same setFontSize and lineHeight values used for ordinary paragraphs. What made the list LOOK larger was the full SPEC.paraGap (5pt) between items, same as between separate prose paragraphs. Bringhurst, Chicago Manual, and New Hart's Rules all set lists with LESS leading than between paragraphs — items belong together as a visual unit, so the gap should be reduced. Implementation: classifyParagraph now flags list-pattern paragraphs with cls.isListItem; the four body-render branches (formatted, plain justified, left-aligned, center / right-aligned) and the pass-1 page-count dry-run all use half the paragGap (Math.round(SPEC.paraGap / 2) ≈ 3pt instead of 5pt) after list items. EPUB matches via new p.list-item CSS class (margin-bottom 0.25em instead of 0.6em). TOC page counts stay accurate because pass 1 applies the same rule.",
         "0.13.19 - TOC entries with long chapter titles now WRAP to multiple lines instead of being truncated with an ellipsis. Truncation with '…' is not a publishing standard — Chicago Manual §1.42, Bringhurst, New Hart's Rules, and the Penguin / Random House style sheets all specify that long chapter titles in a TOC wrap to additional lines, with the page number and dot leaders aligned with the LAST line of the title. Continuation lines sit flush with the start of the title (no extra indent — keeps the layout clean at narrow trim sizes). Inter-line advance for wrapped entries is tight (tocEntrySize × 1.35) so the lines read as a single item; the gap between entries stays at the full tocRowAdvance. Before drawing each entry, the renderer checks whether the whole wrapped block fits on the current TOC page — if not, it page-breaks first so a wrapped title is never split across pages.",
         "0.13.18 - Chapter title and epigraph type sizes brought in line with trade-book convention. Three values were out of range: (1) Chapter title 20pt over body 10pt (= 2.0× ratio) sat above the 1.6-1.8× range Bringhurst and Chicago recommend for 5x8 trade paperbacks, and felt heavy when long titles wrapped to 3+ lines. Reduced to 18pt (1.8× — at the upper end of convention, distinctly larger than body but not dominant). Title line advance now derived from chapterTitleSize × 1.4 so leading scales automatically if the size is tuned again. (2) Epigraph 14pt over body 10pt was 1.4× LARGER than body, which violates every house style — Chicago Manual, Bringhurst, New Hart's Rules, Penguin Random House all set epigraphs equal to or 1pt SMALLER than body (italic, indented). Reduced to SPEC.bodySize - 1 (9pt default, 10pt spacious). Line advance dropped from 20pt to ~12pt (size × 1.35), giving the epigraph the same tighter leading you see in published paperbacks. (3) Epigraph horizontal inset from textW - 60 (192pt of 252pt = 76%) to textW - 30 (88%). The previous inset was within convention but combined with the oversized font, the epigraph wrapped to 4+ narrow lines and looked pinched and over-centered. With both font size and inset adjusted, a typical Maslow-length epigraph now sets to 2 lines at a comfortable measure. (4) Attribution font dropped from 12pt to bodySize - 2 (8pt default) — one point smaller than the epigraph, per convention. EPUB matches: p.epigraph 0.9em, p.epigraph-attribution 0.85em, horizontal margin 1.5em instead of 2em. Reader Bonus title scales with chapterTitleSize so it also moves from 20pt to 18pt — its visual hierarchy versus the chapter title stays the same.",
         "0.13.17 - Unquoted epigraphs (text + em-dash attribution) now detected and rendered correctly. Previously the chapter parser only recognised an epigraph when the first content line started with a quote mark (\", ', “). Pasted epigraphs in the form 'One can choose to go back...\\n—Abraham Maslow' fell through to body content, which meant the drop cap on the chapter's first paragraph landed on the epigraph text and the '—Abraham Maslow' line dangled at the left margin as a stray body paragraph. Two changes: (1) detectChapters now has a second detection path that scans the first ~5 content lines after a chapter heading for an attribution-shaped line (em-dash / en-dash / '- ' followed by 1-6 Title-Cased words, optionally + comma + book title, total length < 80 chars). When found, everything before that line becomes the epigraph, and the dashed line becomes the attribution. (2) extractEmbeddedEpigraph runs at render time on every chapter that has no explicit epigraph set, hoisting an embedded epigraph + attribution pair out of the body so EXISTING chapters in autosaved projects render correctly without the user needing to re-detect. Attribution regex tightened to reject dialogue lines that happen to start with an em-dash ('—Are you coming?' → not an attribution because the second word starts lowercase). Both detection paths feed the same downstream renderer, so PDF and EPUB output stay consistent.",
@@ -1549,6 +1550,15 @@
       // inline markers in prose don't turn into floating images.
       const img = parseImageMarker(working);
       if (img) return { type: "image", alt: img.alt, imageId: img.imageId };
+      // List items render at body size but get tighter spacing below per
+      // typography convention (Bringhurst / Chicago / New Hart's): a
+      // bulleted or numbered list reads as a unit, so inter-item gaps
+      // sit between SPEC.paraGap (full paragraph) and 0 (run-on prose).
+      // The isListItem flag is consumed by the renderer to halve the
+      // post-paragraph gap.
+      if (isListLine(working)) {
+        return { type: "body", text: working, align: align, isListItem: true };
+      }
       return { type: "body", text: working, align: align };
     }
 
@@ -2573,7 +2583,9 @@
             if (y > maxY) { pages++; y = bodyTopY(); }
             y += SPEC.lineHeight;
           }
-          y += SPEC.paraGap;
+          // Match the pass-2 list-item rule: tighter inter-item spacing
+          // so the TOC page count stays in lockstep with rendered output.
+          y += cls.isListItem ? Math.round(SPEC.paraGap / 2) : SPEC.paraGap;
         }
         return pages;
       }
@@ -3095,7 +3107,7 @@
               }
               y += SPEC.lineHeight;
             }
-            y += SPEC.paraGap;
+            y += cls.isListItem ? Math.round(SPEC.paraGap / 2) : SPEC.paraGap;
             continue;
           }
           // cls.align === "left" — explicit ragged-right body. Fall through
@@ -3111,7 +3123,7 @@
               doc.text(lline, textX, y + BASELINE_OFFSET);
               y += SPEC.lineHeight;
             }
-            y += SPEC.paraGap;
+            y += cls.isListItem ? Math.round(SPEC.paraGap / 2) : SPEC.paraGap;
             continue;
           }
 
@@ -3154,7 +3166,7 @@
               y += SPEC.lineHeight;
             }
             resetBodyFont();
-            y += SPEC.paraGap;
+            y += cls.isListItem ? Math.round(SPEC.paraGap / 2) : SPEC.paraGap;
             continue;
           }
 
@@ -3208,7 +3220,7 @@
             drawJustifiedLine(doc, lines[li], textX, y + BASELINE_OFFSET, textW, isLastLine);
             y += SPEC.lineHeight;
           }
-          y += SPEC.paraGap;
+          y += cls.isListItem ? Math.round(SPEC.paraGap / 2) : SPEC.paraGap;
         }
       }
 
@@ -3268,6 +3280,10 @@
         'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-after: avoid; break-after: avoid; }',
         'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; page-break-after: avoid; break-after: avoid; }',
         'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
+        // List items render at body size but with tighter bottom margin
+        // so consecutive bullets / numbered items read as a unit rather
+        // than separate paragraphs. Matches the PDF (half SPEC.paraGap).
+        'p.list-item { margin: 0 0 0.25em; }',
         // Epigraph — Chicago / Bringhurst / New Hart's: italic, equal to
         // or slightly smaller than body, modest horizontal indent. 0.9em
         // matches the PDF's bodySize - 1pt sizing.
@@ -3513,7 +3529,14 @@
           // asterisks and underscores in the body text.
           if (cleaned.startsWith("## ")) body += '  <h2' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(3).trim(), esc) + '</h2>\n';
           else if (cleaned.startsWith("### ")) body += '  <h3' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(4).trim(), esc) + '</h3>\n';
-          else body += '  <p' + alignAttr + '>' + inlineMarkdownToHtml(cleaned, esc) + '</p>\n';
+          else {
+            // List items get a class that triggers tighter margin, so
+            // bulleted / numbered lists read as a unit instead of as
+            // separate paragraphs with full inter-paragraph gaps.
+            // Convention: Bringhurst / Chicago / New Hart's.
+            const liClass = isListLine(cleaned) ? ' class="list-item"' : '';
+            body += '  <p' + liClass + alignAttr + '>' + inlineMarkdownToHtml(cleaned, esc) + '</p>\n';
+          }
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
