@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.22",
+      version: "0.13.23",
       date: "2026-05-19",
       changes: [
+        "0.13.23 - Paste-from-Word/Docs bullet lists no longer lose their bullets. htmlToMarkdownLite's <li> handler was emitting just the inner text with a single \\n between items — the bullet glyph was silently stripped, so a copied semantic <ul><li>A</li><li>B</li></ul> arrived in the editor as four bullet-less lines that the list detector then couldn't see. New handlers: <ul> walks its direct <li> children and emits each as '• content\\n\\n'; <ol> emits 'N. content\\n\\n' with N incrementing from the start attribute (default 1); orphaned <li> outside a list container defaults to bullet rather than dropping the marker. Each item ends with a paragraph break so splitChapterBody sees individual items and classifyParagraph + normalizeListMarker take over from there. To fix CURRENT projects whose lists already arrived bullet-less, re-paste the affected section from Word / Docs once v0.13.23 is loaded — the new handler will restore the bullets.",
         "0.13.22 - Bullet glyphs normalised to the trade-book standard • (U+2022) at body size. Authors paste from Word / Google Docs / Apple Notes / browsers, each of which inserts a different default bullet — most commonly the small MIDDLE DOT (·, U+00B7), which renders as a tiny mid-line dot in Gelasio at 10pt. The user reported bullets looking like 'tiny little dots' rather than visible round bullets. Trade-book convention (Bringhurst, New Hart's Rules, Penguin / Random House) is a uniform round • bullet at body size, set by the typesetter regardless of what the manuscript used. New helper normalizeListMarker() runs at classify time and rewrites any leading bullet character (- * • · ‣ ▪ ◦ ● ○ ⦁) to '• ' followed by the content. Numbered markers are also normalised — '1)' becomes '1.', and tight spacing like '1.Killing' becomes '1. Killing'. BULLETED_LIST_LINE regex now also recognises U+00B7 and other unicode bullet glyphs (previously only -, *, •), so middle-dot lists from Word paste correctly trigger list-item detection. PDF (via classifyParagraph), EPUB (via the chapter loop), and the Step 4 preview thumbnail all share the same normalisation, so the rendered output is consistent across all three formats.",
         "0.13.21 - Epigraph detection now handles bare attributions (no em-dash). Chapter 4 'Building Your Store in a Weekend' had its epigraph 'We are what we repeatedly do. Excellence, then, is not an act, but a habit.' followed by 'Aristotle' on its own paragraph with no dash. v0.13.17's detector required a dash prefix before the author name, so the quote fell through to body, got a drop cap on 'W', and 'Aristotle' dangled as a separate body paragraph. New Path B in extractEmbeddedEpigraph catches the bare-name form: if the first paragraph is 40-500 chars (substantive enough to be a quote), the second is a 1-4 word Title-Cased name under 60 chars ('Aristotle', 'Maya Angelou', 'F. Scott Fitzgerald'), and a real body paragraph (50+ chars) follows after, treat parts[0] as the epigraph and parts[1] as the attribution. Constraints kept tight (substantive body required after, short single-name attribution required) to avoid misreading short fiction-style chapter openings as epigraphs. Path A (em-dash attribution) unchanged.",
         "0.13.20 - Bulleted and numbered list items now use tighter inter-item spacing per typography convention. Confirmed first that the font size IS identical to body — both render at SPEC.bodySize (10pt default / 11pt spacious) via the same setFontSize and lineHeight values used for ordinary paragraphs. What made the list LOOK larger was the full SPEC.paraGap (5pt) between items, same as between separate prose paragraphs. Bringhurst, Chicago Manual, and New Hart's Rules all set lists with LESS leading than between paragraphs — items belong together as a visual unit, so the gap should be reduced. Implementation: classifyParagraph now flags list-pattern paragraphs with cls.isListItem; the four body-render branches (formatted, plain justified, left-aligned, center / right-aligned) and the pass-1 page-count dry-run all use half the paragGap (Math.round(SPEC.paraGap / 2) ≈ 3pt instead of 5pt) after list items. EPUB matches via new p.list-item CSS class (margin-bottom 0.25em instead of 0.6em). TOC page counts stay accurate because pass 1 applies the same rule.",
@@ -544,9 +545,38 @@
             if (inner.trim()) out += "### " + inner.trim() + "\n\n";
             continue;
           }
+          // <ul> / <ol> — emit each child <li> as its own paragraph with
+          // the matching marker prepended ("• " for bullets, "N. " for
+          // numbered). Word, Google Docs, Pages and Apple Notes all paste
+          // lists as semantic <ul>/<ol>/<li>; previously the bullet glyph
+          // was silently stripped because the <li> handler emitted just
+          // the inner text. Each item ends with "\n\n" so splitChapterBody
+          // sees a separate paragraph per item, which the list-item
+          // detector then recognises.
+          if (tag === "ul") {
+            const lis = Array.from(c.children).filter(function(ch) { return ch.tagName === "LI"; });
+            for (const li of lis) {
+              const inner = walk(li, ctxBold, ctxItalic, ctxUnderline).trim();
+              if (inner) out += "• " + inner + "\n\n";
+            }
+            continue;
+          }
+          if (tag === "ol") {
+            const lis = Array.from(c.children).filter(function(ch) { return ch.tagName === "LI"; });
+            let n = parseInt(c.getAttribute("start") || "1", 10);
+            if (!isFinite(n) || n < 1) n = 1;
+            for (const li of lis) {
+              const inner = walk(li, ctxBold, ctxItalic, ctxUnderline).trim();
+              if (inner) out += n + ". " + inner + "\n\n";
+              n++;
+            }
+            continue;
+          }
+          // Orphaned <li> outside a list container — emit as a bullet by
+          // default rather than dropping the marker.
           if (tag === "li") {
-            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline);
-            out += inner.trim() + "\n";
+            const inner = walk(c, ctxBold, ctxItalic, ctxUnderline).trim();
+            if (inner) out += "• " + inner + "\n\n";
             continue;
           }
           // Word / Docs / Pages tables — emit markdown table syntax that
