@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.15",
+      version: "0.13.16",
       date: "2026-05-19",
       changes: [
+        "0.13.16 - Fix drop cap overlapping body text when the first paragraph is short. The drop cap glyph is sized to span SPEC.dropCapLines (= 3) body lines, but the body rendering only advanced y by lines_drawn × lineHeight after the drop-cap paragraph. If that paragraph wrapped to only 1 or 2 lines (because it was a short sentence, or because v0.13.15's list-line split shortened it), y ended up inside the drop cap's vertical extent — and the next paragraph rendered ON TOP of the drop cap glyph at the left margin. Fix: after rendering the drop-cap paragraph in both passes (pass-1 dry run for the TOC and pass-2 actual render), and in both branches (run-based for paragraphs with inline formatting, hyphenation-aware justified for plain prose), pad y forward by the missing line heights when lines.length < SPEC.dropCapLines. Paragraphs that wrap to 3 or more lines are unchanged. Page counts in the TOC stay accurate because pass 1 applies the same clearance.",
         "0.13.15 - Vertical numbered and bulleted lists now render as vertical lists. Previously a chapter body typed as '1. Foo / 2. Bar / 3. Baz' on three lines with no blank line between them would collapse into a single running prose paragraph at output, because splitChapterBody joined single-newline-separated lines with spaces. Same flow that was already special-casing markdown tables and scene-break ornaments. New isListLine() helper recognises a list item when a line starts with: (a) 1-3 digit number, then '.' or ')', then optional whitespace, then a non-digit character — so '1. The first item' or '1.Killing Control' both qualify but '1.5 million' stays prose because the character after the period is a digit; (b) '-', '*', or '•' followed by at least one space then content — so '- Item' or '* Item' qualify but '*italic*' (no space after the asterisk) and '— Helen Hayes' (em-dash attribution) stay prose. List lines get promoted to their own paragraph in splitChapterBody, which flows through pass-1 dry run, pass-2 PDF render, EPUB chapter loop, and Step 4 preview thumbnail — same single helper, so all four outputs render lists consistently as separate paragraphs. Each item then goes through the normal justified body path. Short items render as a single ragged-right line; long items wrap normally.",
         "0.13.14 - Copyright page layout reworked. (1) Bigger gap (35pt instead of 20pt) between 'PUBLISHED BY ...' and the 'Copyright © YYYY by ...' line so the publisher imprint reads as its own item rather than crowding the copyright statement. (2) The long 'All rights reserved' paragraph is now LEFT-ALIGNED AND JUSTIFIED at the full text-column width — same justified path the body chapter text uses (breakIntoJustifiedLines + drawJustifiedLine), with the last line ragged-right per industry convention. Single-line items (publisher, copyright statement, ISBN) stay centered as before. (3) Extra breathing room (18pt instead of 10pt) before the ISBN line. (4) Bottom clearance increased from 80pt to 100pt (about 1.4 inches on the 5x8 page) — the block now sits comfortably in the lower portion rather than near the edge. EPUB matches: new p.copyright-block class for justified left-aligned paragraph, p.copyright-publisher for extra bottom margin under the publisher imprint, p.copyright-isbn for top margin above ISBN. div.copyright-page padding-bottom raised to match.",
         "0.13.13 - Copyright block clearance from the bottom edge increased from 45pt to 80pt (about 1.1\" on the 5x8 page). Well-typeset trade books (Penguin, Knopf, HarperCollins) sit the copyright block roughly 1 to 1.25 inches above the bottom edge — firmly in the lower third with breathing room — not jammed against the bottom margin. 45pt was technically 'at the bottom' but the block extended past the page-number zone (y=546) and read as 'ran out of room' rather than deliberate placement. 80pt sits the block in the lower third where readers expect publication details. EPUB copyright-page padding-bottom raised from 6vh to 12vh to match.",
@@ -2261,12 +2262,14 @@
             doc.setFontSize(SPEC.bodySize);
             const narrowWidth = textW - dropCapWidth - 5;
 
+            let dropCapLineCount;
             if (containsFormatting(para)) {
               // Run-based drop cap: parse the remaining text into runs and
               // count lines via layoutRunsMixed with [narrow, narrow, narrow, full].
               const runs = parseInlineRuns(dc.rest);
               const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
               const lines = layoutRunsMixed(doc, runs, widths, SPEC.bodySize, BODY_FONT);
+              dropCapLineCount = lines.length;
               for (let li = 0; li < lines.length; li++) {
                 if (y > maxY) { pages++; y = bodyTopY(); }
                 y += SPEC.lineHeight;
@@ -2276,10 +2279,20 @@
               // drop cap), subsequent lines are full width.
               const widths = [narrowWidth, narrowWidth, narrowWidth, textW];
               const lines = breakIntoJustifiedLines(doc, dc.rest, widths, SPEC.bodySize, BODY_FONT);
+              dropCapLineCount = lines.length;
               for (let li = 0; li < lines.length; li++) {
                 if (y > maxY) { pages++; y = bodyTopY(); }
                 y += SPEC.lineHeight;
               }
+            }
+            // The drop cap glyph is sized to span SPEC.dropCapLines body
+            // lines. If the first paragraph wrapped to fewer than that, y
+            // would only have advanced by lines * lineHeight — leaving the
+            // drop cap extending DOWN into the space where the next block
+            // is about to render. Pad y forward to clear the drop cap so
+            // following paragraphs / headings / lists never overlap it.
+            if (dropCapLineCount < SPEC.dropCapLines) {
+              y += (SPEC.dropCapLines - dropCapLineCount) * SPEC.lineHeight;
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
@@ -2693,6 +2706,12 @@
                 y += SPEC.lineHeight;
               }
               resetBodyFont();
+              // Clear the drop cap's vertical extent if the paragraph wrapped
+              // to fewer than dropCapLines rows. Otherwise the drop cap would
+              // hang down into the next block and overlap it.
+              if (lines.length < SPEC.dropCapLines) {
+                y += (SPEC.dropCapLines - lines.length) * SPEC.lineHeight;
+              }
               isFirstPara = false; y += SPEC.paraGap; continue;
             }
 
@@ -2709,6 +2728,10 @@
               const isLastLine = li === lines.length - 1;
               drawJustifiedLine(doc, lines[li], lineX, y + BASELINE_OFFSET, lineMaxW, isLastLine);
               y += SPEC.lineHeight;
+            }
+            // Same drop-cap clearance as the formatted branch above.
+            if (lines.length < SPEC.dropCapLines) {
+              y += (SPEC.dropCapLines - lines.length) * SPEC.lineHeight;
             }
             isFirstPara = false; y += SPEC.paraGap; continue;
           }
