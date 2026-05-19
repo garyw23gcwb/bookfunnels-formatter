@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.18",
+      version: "0.13.19",
       date: "2026-05-19",
       changes: [
+        "0.13.19 - TOC entries with long chapter titles now WRAP to multiple lines instead of being truncated with an ellipsis. Truncation with '…' is not a publishing standard — Chicago Manual §1.42, Bringhurst, New Hart's Rules, and the Penguin / Random House style sheets all specify that long chapter titles in a TOC wrap to additional lines, with the page number and dot leaders aligned with the LAST line of the title. Continuation lines sit flush with the start of the title (no extra indent — keeps the layout clean at narrow trim sizes). Inter-line advance for wrapped entries is tight (tocEntrySize × 1.35) so the lines read as a single item; the gap between entries stays at the full tocRowAdvance. Before drawing each entry, the renderer checks whether the whole wrapped block fits on the current TOC page — if not, it page-breaks first so a wrapped title is never split across pages.",
         "0.13.18 - Chapter title and epigraph type sizes brought in line with trade-book convention. Three values were out of range: (1) Chapter title 20pt over body 10pt (= 2.0× ratio) sat above the 1.6-1.8× range Bringhurst and Chicago recommend for 5x8 trade paperbacks, and felt heavy when long titles wrapped to 3+ lines. Reduced to 18pt (1.8× — at the upper end of convention, distinctly larger than body but not dominant). Title line advance now derived from chapterTitleSize × 1.4 so leading scales automatically if the size is tuned again. (2) Epigraph 14pt over body 10pt was 1.4× LARGER than body, which violates every house style — Chicago Manual, Bringhurst, New Hart's Rules, Penguin Random House all set epigraphs equal to or 1pt SMALLER than body (italic, indented). Reduced to SPEC.bodySize - 1 (9pt default, 10pt spacious). Line advance dropped from 20pt to ~12pt (size × 1.35), giving the epigraph the same tighter leading you see in published paperbacks. (3) Epigraph horizontal inset from textW - 60 (192pt of 252pt = 76%) to textW - 30 (88%). The previous inset was within convention but combined with the oversized font, the epigraph wrapped to 4+ narrow lines and looked pinched and over-centered. With both font size and inset adjusted, a typical Maslow-length epigraph now sets to 2 lines at a comfortable measure. (4) Attribution font dropped from 12pt to bodySize - 2 (8pt default) — one point smaller than the epigraph, per convention. EPUB matches: p.epigraph 0.9em, p.epigraph-attribution 0.85em, horizontal margin 1.5em instead of 2em. Reader Bonus title scales with chapterTitleSize so it also moves from 20pt to 18pt — its visual hierarchy versus the chapter title stays the same.",
         "0.13.17 - Unquoted epigraphs (text + em-dash attribution) now detected and rendered correctly. Previously the chapter parser only recognised an epigraph when the first content line started with a quote mark (\", ', “). Pasted epigraphs in the form 'One can choose to go back...\\n—Abraham Maslow' fell through to body content, which meant the drop cap on the chapter's first paragraph landed on the epigraph text and the '—Abraham Maslow' line dangled at the left margin as a stray body paragraph. Two changes: (1) detectChapters now has a second detection path that scans the first ~5 content lines after a chapter heading for an attribution-shaped line (em-dash / en-dash / '- ' followed by 1-6 Title-Cased words, optionally + comma + book title, total length < 80 chars). When found, everything before that line becomes the epigraph, and the dashed line becomes the attribution. (2) extractEmbeddedEpigraph runs at render time on every chapter that has no explicit epigraph set, hoisting an embedded epigraph + attribution pair out of the body so EXISTING chapters in autosaved projects render correctly without the user needing to re-detect. Attribution regex tightened to reject dialogue lines that happen to start with an em-dash ('—Are you coming?' → not an attribution because the second word starts lowercase). Both detection paths feed the same downstream renderer, so PDF and EPUB output stay consistent.",
         "0.13.16 - Fix drop cap overlapping body text when the first paragraph is short. The drop cap glyph is sized to span SPEC.dropCapLines (= 3) body lines, but the body rendering only advanced y by lines_drawn × lineHeight after the drop-cap paragraph. If that paragraph wrapped to only 1 or 2 lines (because it was a short sentence, or because v0.13.15's list-line split shortened it), y ended up inside the drop cap's vertical extent — and the next paragraph rendered ON TOP of the drop cap glyph at the left margin. Fix: after rendering the drop-cap paragraph in both passes (pass-1 dry run for the TOC and pass-2 actual render), and in both branches (run-based for paragraphs with inline formatting, hyphenation-aware justified for plain prose), pad y forward by the missing line heights when lines.length < SPEC.dropCapLines. Paragraphs that wrap to 3 or more lines are unchanged. Page counts in the TOC stay accurate because pass 1 applies the same clearance.",
@@ -2625,11 +2626,15 @@
       // ---- PASS 2: RENDER TOC WITH CORRECT PAGE NUMBERS ----
       // TOC typography (trade-book convention used by Penguin, Random House,
       // O'Reilly, etc.):
-      //   * "Contents" heading: 18pt bold — smaller than the 20pt chapter
-      //     titles so the TOC reads as a reference, not a competing display.
+      //   * "Contents" heading: 18pt bold — same as the chapter title size,
+      //     centered with breathing room so it reads as a page heading
+      //     rather than a display element competing for attention.
       //   * Entries: match SPEC.bodySize (10pt default / 11pt spacious) so
       //     TOC rhythm is consistent with body text in the chapters.
-      //   * Row spacing: 2x line-height for breathing room without bloat.
+      //   * Row spacing: 2× line-height between entries.
+      //   * Long titles WRAP to multiple lines (Chicago Manual §1.42,
+      //     Bringhurst, New Hart's Rules). Page number and dot leaders
+      //     align with the LAST line of the title. Never truncate.
       onProgress("Building table of contents...");
       newPage(); ty = 60;
       doc.setFont(BODY_FONT, "bold"); doc.setFontSize(18); doc.setTextColor(30);
@@ -2657,6 +2662,11 @@
       const dotGlyphWidth = doc.getTextWidth(".");
       const dotStep = dotGlyphWidth + 3; // 3pt gap between dots, same for every row
 
+      // Inter-line advance WITHIN a wrapped TOC entry \u2014 tight, so the
+      // continuation line reads as part of the same item. The gap between
+      // ENTRIES stays at tocRowAdvance.
+      const tocWrappedLineAdvance = Math.round(tocEntrySize * 1.35);
+
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
         if (ch.includeInToc === false) continue;
@@ -2671,27 +2681,39 @@
         const minDotsSpace = 18; // at least ~5 dots worth
         const maxTitleWidth = tocTextW - maxPageNumWidth - (gap * 2) - minDotsSpace;
 
-        // Truncate title with ellipsis only if truly necessary
-        let truncatedTitle = displayTitle;
-        let titleWidth = doc.getTextWidth(truncatedTitle);
-        if (titleWidth > maxTitleWidth) {
-          while (titleWidth > maxTitleWidth && truncatedTitle.length > 10) {
-            truncatedTitle = truncatedTitle.slice(0, -1);
-            titleWidth = doc.getTextWidth(truncatedTitle + "\u2026");
-          }
-          truncatedTitle = truncatedTitle + "\u2026";
-          titleWidth = doc.getTextWidth(truncatedTitle);
+        // Wrap long titles to multiple lines. Trade-book convention
+        // (Chicago Manual \u00a71.42, Bringhurst, New Hart's Rules, Penguin /
+        // Random House style): long chapter titles WRAP \u2014 they are not
+        // truncated. The page number aligns with the LAST line; only the
+        // last line carries dot leaders. Continuation lines (the lines
+        // above the last) sit flush with the start of the title.
+        const titleLines = doc.splitTextToSize(displayTitle, maxTitleWidth);
+        const lastLineIdx = titleLines.length - 1;
+
+        // If the whole entry won't fit on the current TOC page, break first
+        // so the wrapped title isn't split across pages.
+        const entryHeight = lastLineIdx * tocWrappedLineAdvance + tocRowAdvance;
+        if (ty + entryHeight > SPEC.pageH - 80) {
+          newPage(); ty = 60;
+          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
         }
 
-        // Draw title (left)
-        doc.text(truncatedTitle, tocTextX, ty);
+        // Draw any continuation lines (everything except the last) first \u2014
+        // plain title text, no page number, no dots.
+        for (let li = 0; li < lastLineIdx; li++) {
+          doc.text(titleLines[li], tocTextX, ty);
+          ty += tocWrappedLineAdvance;
+        }
 
-        // Draw page number (right)
+        // Draw the last line with page number + dot leaders.
+        const lastLine = titleLines[lastLineIdx];
+        const lastLineWidth = doc.getTextWidth(lastLine);
+        doc.text(lastLine, tocTextX, ty);
+
         const pageNumX = tocTextX + tocTextW;
         doc.text(pageNumStr, pageNumX, ty, { align: "right" });
 
-        // Draw dot leaders between, using the same dotStep for every row so density is consistent
-        const dotsStart = tocTextX + titleWidth + gap;
+        const dotsStart = tocTextX + lastLineWidth + gap;
         const dotsEnd = pageNumX - maxPageNumWidth - gap;
         if (dotsEnd > dotsStart) {
           // Right-align the dots against the page-number column so dots end at the same x on every row
@@ -2703,7 +2725,6 @@
         }
 
         ty += tocRowAdvance;
-        if (ty > SPEC.pageH - 80) { newPage(); ty = 60; }
       }
       newPage(); // blank after TOC
 
