@@ -132,9 +132,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.16",
+      version: "0.13.17",
       date: "2026-05-19",
       changes: [
+        "0.13.17 - Unquoted epigraphs (text + em-dash attribution) now detected and rendered correctly. Previously the chapter parser only recognised an epigraph when the first content line started with a quote mark (\", ', “). Pasted epigraphs in the form 'One can choose to go back...\\n—Abraham Maslow' fell through to body content, which meant the drop cap on the chapter's first paragraph landed on the epigraph text and the '—Abraham Maslow' line dangled at the left margin as a stray body paragraph. Two changes: (1) detectChapters now has a second detection path that scans the first ~5 content lines after a chapter heading for an attribution-shaped line (em-dash / en-dash / '- ' followed by 1-6 Title-Cased words, optionally + comma + book title, total length < 80 chars). When found, everything before that line becomes the epigraph, and the dashed line becomes the attribution. (2) extractEmbeddedEpigraph runs at render time on every chapter that has no explicit epigraph set, hoisting an embedded epigraph + attribution pair out of the body so EXISTING chapters in autosaved projects render correctly without the user needing to re-detect. Attribution regex tightened to reject dialogue lines that happen to start with an em-dash ('—Are you coming?' → not an attribution because the second word starts lowercase). Both detection paths feed the same downstream renderer, so PDF and EPUB output stay consistent.",
         "0.13.16 - Fix drop cap overlapping body text when the first paragraph is short. The drop cap glyph is sized to span SPEC.dropCapLines (= 3) body lines, but the body rendering only advanced y by lines_drawn × lineHeight after the drop-cap paragraph. If that paragraph wrapped to only 1 or 2 lines (because it was a short sentence, or because v0.13.15's list-line split shortened it), y ended up inside the drop cap's vertical extent — and the next paragraph rendered ON TOP of the drop cap glyph at the left margin. Fix: after rendering the drop-cap paragraph in both passes (pass-1 dry run for the TOC and pass-2 actual render), and in both branches (run-based for paragraphs with inline formatting, hyphenation-aware justified for plain prose), pad y forward by the missing line heights when lines.length < SPEC.dropCapLines. Paragraphs that wrap to 3 or more lines are unchanged. Page counts in the TOC stay accurate because pass 1 applies the same clearance.",
         "0.13.15 - Vertical numbered and bulleted lists now render as vertical lists. Previously a chapter body typed as '1. Foo / 2. Bar / 3. Baz' on three lines with no blank line between them would collapse into a single running prose paragraph at output, because splitChapterBody joined single-newline-separated lines with spaces. Same flow that was already special-casing markdown tables and scene-break ornaments. New isListLine() helper recognises a list item when a line starts with: (a) 1-3 digit number, then '.' or ')', then optional whitespace, then a non-digit character — so '1. The first item' or '1.Killing Control' both qualify but '1.5 million' stays prose because the character after the period is a digit; (b) '-', '*', or '•' followed by at least one space then content — so '- Item' or '* Item' qualify but '*italic*' (no space after the asterisk) and '— Helen Hayes' (em-dash attribution) stay prose. List lines get promoted to their own paragraph in splitChapterBody, which flows through pass-1 dry run, pass-2 PDF render, EPUB chapter loop, and Step 4 preview thumbnail — same single helper, so all four outputs render lists consistently as separate paragraphs. Each item then goes through the normal justified body path. Short items render as a single ragged-right line; long items wrap normally.",
         "0.13.14 - Copyright page layout reworked. (1) Bigger gap (35pt instead of 20pt) between 'PUBLISHED BY ...' and the 'Copyright © YYYY by ...' line so the publisher imprint reads as its own item rather than crowding the copyright statement. (2) The long 'All rights reserved' paragraph is now LEFT-ALIGNED AND JUSTIFIED at the full text-column width — same justified path the body chapter text uses (breakIntoJustifiedLines + drawJustifiedLine), with the last line ragged-right per industry convention. Single-line items (publisher, copyright statement, ISBN) stay centered as before. (3) Extra breathing room (18pt instead of 10pt) before the ISBN line. (4) Bottom clearance increased from 80pt to 100pt (about 1.4 inches on the 5x8 page) — the block now sits comfortably in the lower portion rather than near the edge. EPUB matches: new p.copyright-block class for justified left-aligned paragraph, p.copyright-publisher for extra bottom margin under the publisher imprint, p.copyright-isbn for top margin above ISBN. div.copyright-page padding-bottom raised to match.",
@@ -1053,6 +1054,58 @@
       return false;
     }
 
+    // Runtime fallback: try to extract an embedded epigraph from the BODY
+    // of a chapter that has no explicit ch.epigraph set. This catches the
+    // case where a chapter was authored / pasted before the detector was
+    // expanded to recognise unquoted epigraphs with em-dash attributions
+    // (the original detector required the first content line to start with
+    // a quote mark). Returns { epigraph, attribution, body } if a plausible
+    // epigraph is found at the very top of the body, or null otherwise.
+    //
+    // Heuristics — deliberately conservative so we never misread a real
+    // body paragraph as an epigraph:
+    //   - The body must split into at least 2 paragraphs (separated by a
+    //     blank line). The first is the candidate epigraph, the second is
+    //     the candidate attribution.
+    //   - The candidate epigraph is <= 500 chars total.
+    //   - The candidate attribution starts with em-dash (—), en-dash (–),
+    //     or "- ", then a capital letter; total length < 80 chars.
+    //   - (Future tightening if needed: require the attribution paragraph
+    //     to be a single line, no internal blank lines.)
+    function extractEmbeddedEpigraph(body) {
+      if (!body) return null;
+      const parts = String(body).split(/\n\s*\n/).map(function(s) { return s.trim(); }).filter(Boolean);
+      if (parts.length < 2) return null;
+      const candidateEp = parts[0];
+      const candidateAttrib = parts[1];
+      if (candidateEp.length === 0 || candidateEp.length > 500) return null;
+      if (candidateAttrib.length >= 80) return null;
+      // Same tight attribution regex used by detectChapters — 1-6
+      // Title-Cased words optionally followed by ", book title". Rejects
+      // dialogue lines that just happen to start with an em-dash.
+      if (!/^(?:[—–]|-\s)\s*[A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,5}(?:,.{1,60})?$/.test(candidateAttrib)) return null;
+      return {
+        epigraph: candidateEp.replace(/["“”']/g, "").trim(),
+        attribution: candidateAttrib.replace(/^(?:[—–]|-\s)\s*/, "").trim(),
+        body: parts.slice(2).join("\n\n"),
+      };
+    }
+
+    // Wrap a chapter so that if it has no explicit epigraph but the body
+    // begins with an embedded epigraph + attribution pair, the renderer
+    // sees a chapter object with the epigraph hoisted out of the body.
+    // Pure (does not mutate the input).
+    function ensureChapterEpigraph(ch) {
+      if (!ch || ch.epigraph) return ch;
+      const found = extractEmbeddedEpigraph(ch.body);
+      if (!found) return ch;
+      return Object.assign({}, ch, {
+        epigraph: found.epigraph,
+        epigraphAttribution: found.attribution,
+        body: found.body,
+      });
+    }
+
     function detectChapters(text) {
       const lines = text.split(/\n/);
       const chapters = [];
@@ -1095,15 +1148,45 @@
           currentChapter = { id: Math.random().toString(36).slice(2), num: chapterNum, title: chapterTitle, epigraph: "", epigraphAttribution: "", body: "", includeInToc: !isLikelyBackMatter(chapterTitle), images: {} };
           buffer = [];
           
-          // Look ahead for epigraph (quoted text after chapter heading)
+          // Look ahead for an epigraph after the chapter heading. Two
+          // detection paths:
+          //   (A) Quoted epigraph \u2014 the first content line starts with " or
+          //       ' or a curly quote. Used to be the only detected form.
+          //   (B) Unquoted epigraph followed by an em-dash attribution \u2014
+          //       e.g. "One can choose to go back...\n\u2014Abraham Maslow".
+          //       Detected by scanning the first few content lines for a
+          //       line that LOOKS like an attribution (starts with em-dash
+          //       / en-dash / hyphen-space, followed by a short Capitalized
+          //       phrase). Everything before that line becomes the epigraph.
+          //       Without this, an unquoted epigraph fell through to the
+          //       body and got a drop cap applied to it. (Bug filed v0.13.17.)
           let checkLines = [];
           for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
             const nl = lines[j].trim();
             if (nl) checkLines.push({ line: nl, idx: j });
           }
+          // Helper: does this line look like an attribution?
+          //   - starts with em-dash (\u2014), en-dash (\u2013), or "- "
+          //   - rest of line begins with a capital letter
+          //   - total length < 80 chars
+          // Tight enough to avoid catching dialogue lines or ordinary prose
+          // that happens to begin with a dash.
+          // Real attributions look like 1-6 Title-Cased words, optionally
+          // followed by a comma + book title. Dialogue lines starting with
+          // em-dash ("\u2014Are you coming? she asked.") fail the title-case
+          // requirement because the second word starts lowercase.
+          const looksLikeAttribution = function(s) {
+            if (s.length >= 80) return false;
+            return /^(?:[\u2014\u2013]|-\s)\s*[A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,5}(?:,.{1,60})?$/.test(s);
+          };
+          const stripAttributionDash = function(s) {
+            return s.replace(/^(?:[\u2014\u2013]|-\s)\s*/, "").trim();
+          };
+
           if (checkLines.length > 0) {
             const firstContent = checkLines[0].line;
             if (firstContent.startsWith('"') || firstContent.startsWith("\u201C") || firstContent.startsWith("'")) {
+              // ---- Path (A): quoted epigraph ----
               // Check if attribution is on the same line: "Quote text" - Author Name
               const sameLineMatch = firstContent.match(/^["'\u201C](.+?)["'\u201D]\s*[-\u2014\u2013]\s*(.+)$/);
               if (sameLineMatch) {
@@ -1117,7 +1200,7 @@
                 for (const cl of checkLines) {
                   // Check for standalone attribution line
                   if (cl.line.startsWith("- ") || cl.line.startsWith("\u2014") || cl.line.startsWith("\u2013")) {
-                    currentChapter.epigraphAttribution = cl.line.replace(/^[-\u2014\u2013]\s*/, "");
+                    currentChapter.epigraphAttribution = stripAttributionDash(cl.line);
                     i = cl.idx;
                     break;
                   }
@@ -1138,6 +1221,30 @@
                 }
                 if (epLines.length > 0) {
                   currentChapter.epigraph = epLines.join(" ").replace(/["\u201C\u201D']/g, "").trim();
+                }
+              }
+            } else {
+              // ---- Path (B): unquoted epigraph + em-dash attribution ----
+              // Walk the first up-to-5 content lines looking for an
+              // attribution. If we find one, everything before it is the
+              // epigraph. Constraints: the epigraph block must be at least
+              // 1 line and at most 500 characters total \u2014 keeps us from
+              // misreading 6 paragraphs of body prose as an epigraph just
+              // because the 7th line happens to start with a dash.
+              let attribIdx = -1;
+              for (let j = 0; j < Math.min(checkLines.length, 5); j++) {
+                if (j > 0 && looksLikeAttribution(checkLines[j].line)) {
+                  attribIdx = j;
+                  break;
+                }
+              }
+              if (attribIdx > 0) {
+                const epLines = checkLines.slice(0, attribIdx).map(function(c) { return c.line; });
+                const joined = epLines.join(" ").trim();
+                if (joined.length > 0 && joined.length < 500) {
+                  currentChapter.epigraph = joined.replace(/["\u201C\u201D']/g, "").trim();
+                  currentChapter.epigraphAttribution = stripAttributionDash(checkLines[attribIdx].line);
+                  i = checkLines[attribIdx].idx;
                 }
               }
             }
@@ -1797,6 +1904,11 @@
       const ctaUrlOriginal = bookData && bookData.ctaUrl ? bookData.ctaUrl : "";
       bookData = smartQuotesDeep(bookData);
       if (bookData) bookData.ctaUrl = ctaUrlOriginal;
+      // For each chapter, if no explicit epigraph is set but the body begins
+      // with an embedded epigraph + em-dash attribution pair, hoist them out
+      // of the body so the renderer styles them as a real epigraph block.
+      // No-op when the chapter already has an explicit epigraph.
+      chapters = (chapters || []).map(ensureChapterEpigraph);
       chapters = smartQuotesDeep(chapters);
 
       // Update SPEC based on selected text size preset
@@ -3071,6 +3183,10 @@
       if (typeof JSZip === "undefined") {
         throw new Error("JSZip not loaded. Please refresh the page.");
       }
+
+      // Same epigraph-hoist pass the PDF renderer does, so EPUB output
+      // stays consistent for chapters whose epigraph is embedded in body.
+      chapters = (chapters || []).map(ensureChapterEpigraph);
 
       // Run smart quotes on all user text (same as PDF path)
       const ctaUrlOriginal = bookData && bookData.ctaUrl ? bookData.ctaUrl : "";
