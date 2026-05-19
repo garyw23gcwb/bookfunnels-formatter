@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.20",
+      version: "0.13.21",
       date: "2026-05-19",
       changes: [
+        "0.13.21 - Epigraph detection now handles bare attributions (no em-dash). Chapter 4 'Building Your Store in a Weekend' had its epigraph 'We are what we repeatedly do. Excellence, then, is not an act, but a habit.' followed by 'Aristotle' on its own paragraph with no dash. v0.13.17's detector required a dash prefix before the author name, so the quote fell through to body, got a drop cap on 'W', and 'Aristotle' dangled as a separate body paragraph. New Path B in extractEmbeddedEpigraph catches the bare-name form: if the first paragraph is 40-500 chars (substantive enough to be a quote), the second is a 1-4 word Title-Cased name under 60 chars ('Aristotle', 'Maya Angelou', 'F. Scott Fitzgerald'), and a real body paragraph (50+ chars) follows after, treat parts[0] as the epigraph and parts[1] as the attribution. Constraints kept tight (substantive body required after, short single-name attribution required) to avoid misreading short fiction-style chapter openings as epigraphs. Path A (em-dash attribution) unchanged.",
         "0.13.20 - Bulleted and numbered list items now use tighter inter-item spacing per typography convention. Confirmed first that the font size IS identical to body — both render at SPEC.bodySize (10pt default / 11pt spacious) via the same setFontSize and lineHeight values used for ordinary paragraphs. What made the list LOOK larger was the full SPEC.paraGap (5pt) between items, same as between separate prose paragraphs. Bringhurst, Chicago Manual, and New Hart's Rules all set lists with LESS leading than between paragraphs — items belong together as a visual unit, so the gap should be reduced. Implementation: classifyParagraph now flags list-pattern paragraphs with cls.isListItem; the four body-render branches (formatted, plain justified, left-aligned, center / right-aligned) and the pass-1 page-count dry-run all use half the paragGap (Math.round(SPEC.paraGap / 2) ≈ 3pt instead of 5pt) after list items. EPUB matches via new p.list-item CSS class (margin-bottom 0.25em instead of 0.6em). TOC page counts stay accurate because pass 1 applies the same rule.",
         "0.13.19 - TOC entries with long chapter titles now WRAP to multiple lines instead of being truncated with an ellipsis. Truncation with '…' is not a publishing standard — Chicago Manual §1.42, Bringhurst, New Hart's Rules, and the Penguin / Random House style sheets all specify that long chapter titles in a TOC wrap to additional lines, with the page number and dot leaders aligned with the LAST line of the title. Continuation lines sit flush with the start of the title (no extra indent — keeps the layout clean at narrow trim sizes). Inter-line advance for wrapped entries is tight (tocEntrySize × 1.35) so the lines read as a single item; the gap between entries stays at the full tocRowAdvance. Before drawing each entry, the renderer checks whether the whole wrapped block fits on the current TOC page — if not, it page-breaks first so a wrapped title is never split across pages.",
         "0.13.18 - Chapter title and epigraph type sizes brought in line with trade-book convention. Three values were out of range: (1) Chapter title 20pt over body 10pt (= 2.0× ratio) sat above the 1.6-1.8× range Bringhurst and Chicago recommend for 5x8 trade paperbacks, and felt heavy when long titles wrapped to 3+ lines. Reduced to 18pt (1.8× — at the upper end of convention, distinctly larger than body but not dominant). Title line advance now derived from chapterTitleSize × 1.4 so leading scales automatically if the size is tuned again. (2) Epigraph 14pt over body 10pt was 1.4× LARGER than body, which violates every house style — Chicago Manual, Bringhurst, New Hart's Rules, Penguin Random House all set epigraphs equal to or 1pt SMALLER than body (italic, indented). Reduced to SPEC.bodySize - 1 (9pt default, 10pt spacious). Line advance dropped from 20pt to ~12pt (size × 1.35), giving the epigraph the same tighter leading you see in published paperbacks. (3) Epigraph horizontal inset from textW - 60 (192pt of 252pt = 76%) to textW - 30 (88%). The previous inset was within convention but combined with the oversized font, the epigraph wrapped to 4+ narrow lines and looked pinched and over-centered. With both font size and inset adjusted, a typical Maslow-length epigraph now sets to 2 lines at a comfortable measure. (4) Attribution font dropped from 12pt to bodySize - 2 (8pt default) — one point smaller than the epigraph, per convention. EPUB matches: p.epigraph 0.9em, p.epigraph-attribution 0.85em, horizontal margin 1.5em instead of 2em. Reader Bonus title scales with chapterTitleSize so it also moves from 20pt to 18pt — its visual hierarchy versus the chapter title stays the same.",
@@ -1090,15 +1091,44 @@
       const candidateAttrib = parts[1];
       if (candidateEp.length === 0 || candidateEp.length > 500) return null;
       if (candidateAttrib.length >= 80) return null;
-      // Same tight attribution regex used by detectChapters — 1-6
-      // Title-Cased words optionally followed by ", book title". Rejects
+
+      // Path A: explicit em-dash / en-dash / "- " attribution. Tight regex —
+      // 1-6 Title-Cased words optionally followed by ", book title". Rejects
       // dialogue lines that just happen to start with an em-dash.
-      if (!/^(?:[—–]|-\s)\s*[A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,5}(?:,.{1,60})?$/.test(candidateAttrib)) return null;
-      return {
-        epigraph: candidateEp.replace(/["“”']/g, "").trim(),
-        attribution: candidateAttrib.replace(/^(?:[—–]|-\s)\s*/, "").trim(),
-        body: parts.slice(2).join("\n\n"),
-      };
+      if (/^(?:[—–]|-\s)\s*[A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,5}(?:,.{1,60})?$/.test(candidateAttrib)) {
+        return {
+          epigraph: candidateEp.replace(/["“”']/g, "").trim(),
+          attribution: candidateAttrib.replace(/^(?:[—–]|-\s)\s*/, "").trim(),
+          body: parts.slice(2).join("\n\n"),
+        };
+      }
+
+      // Path B: bare attribution (no dash) — just a Title-Cased name on its
+      // own short paragraph (e.g. "Aristotle", "Maya Angelou", "F. Scott
+      // Fitzgerald"). To avoid misreading short fiction openings, require:
+      //   - candidate epigraph is substantive (40+ chars), so single short
+      //     openings like "He walked in." don't qualify
+      //   - candidate attribution is short (< 60 chars) and 1-4 Title-Cased
+      //     words, optionally with a trailing period
+      //   - real body follows after the attribution (parts[2] exists and
+      //     is at least 50 chars) — guards against accidental chapter-end
+      //     markers like a single short final line being misread as
+      //     attribution.
+      if (
+        candidateEp.length >= 40 &&
+        candidateAttrib.length < 60 &&
+        parts.length >= 3 &&
+        parts[2].length > 50 &&
+        /^[A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,3}\.?$/.test(candidateAttrib)
+      ) {
+        return {
+          epigraph: candidateEp.replace(/["“”']/g, "").trim(),
+          attribution: candidateAttrib.replace(/\.?$/, "").trim(),
+          body: parts.slice(2).join("\n\n"),
+        };
+      }
+
+      return null;
     }
 
     // Wrap a chapter so that if it has no explicit epigraph but the body
