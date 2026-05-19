@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.21",
+      version: "0.13.22",
       date: "2026-05-19",
       changes: [
+        "0.13.22 - Bullet glyphs normalised to the trade-book standard • (U+2022) at body size. Authors paste from Word / Google Docs / Apple Notes / browsers, each of which inserts a different default bullet — most commonly the small MIDDLE DOT (·, U+00B7), which renders as a tiny mid-line dot in Gelasio at 10pt. The user reported bullets looking like 'tiny little dots' rather than visible round bullets. Trade-book convention (Bringhurst, New Hart's Rules, Penguin / Random House) is a uniform round • bullet at body size, set by the typesetter regardless of what the manuscript used. New helper normalizeListMarker() runs at classify time and rewrites any leading bullet character (- * • · ‣ ▪ ◦ ● ○ ⦁) to '• ' followed by the content. Numbered markers are also normalised — '1)' becomes '1.', and tight spacing like '1.Killing' becomes '1. Killing'. BULLETED_LIST_LINE regex now also recognises U+00B7 and other unicode bullet glyphs (previously only -, *, •), so middle-dot lists from Word paste correctly trigger list-item detection. PDF (via classifyParagraph), EPUB (via the chapter loop), and the Step 4 preview thumbnail all share the same normalisation, so the rendered output is consistent across all three formats.",
         "0.13.21 - Epigraph detection now handles bare attributions (no em-dash). Chapter 4 'Building Your Store in a Weekend' had its epigraph 'We are what we repeatedly do. Excellence, then, is not an act, but a habit.' followed by 'Aristotle' on its own paragraph with no dash. v0.13.17's detector required a dash prefix before the author name, so the quote fell through to body, got a drop cap on 'W', and 'Aristotle' dangled as a separate body paragraph. New Path B in extractEmbeddedEpigraph catches the bare-name form: if the first paragraph is 40-500 chars (substantive enough to be a quote), the second is a 1-4 word Title-Cased name under 60 chars ('Aristotle', 'Maya Angelou', 'F. Scott Fitzgerald'), and a real body paragraph (50+ chars) follows after, treat parts[0] as the epigraph and parts[1] as the attribution. Constraints kept tight (substantive body required after, short single-name attribution required) to avoid misreading short fiction-style chapter openings as epigraphs. Path A (em-dash attribution) unchanged.",
         "0.13.20 - Bulleted and numbered list items now use tighter inter-item spacing per typography convention. Confirmed first that the font size IS identical to body — both render at SPEC.bodySize (10pt default / 11pt spacious) via the same setFontSize and lineHeight values used for ordinary paragraphs. What made the list LOOK larger was the full SPEC.paraGap (5pt) between items, same as between separate prose paragraphs. Bringhurst, Chicago Manual, and New Hart's Rules all set lists with LESS leading than between paragraphs — items belong together as a visual unit, so the gap should be reduced. Implementation: classifyParagraph now flags list-pattern paragraphs with cls.isListItem; the four body-render branches (formatted, plain justified, left-aligned, center / right-aligned) and the pass-1 page-count dry-run all use half the paragGap (Math.round(SPEC.paraGap / 2) ≈ 3pt instead of 5pt) after list items. EPUB matches via new p.list-item CSS class (margin-bottom 0.25em instead of 0.6em). TOC page counts stay accurate because pass 1 applies the same rule.",
         "0.13.19 - TOC entries with long chapter titles now WRAP to multiple lines instead of being truncated with an ellipsis. Truncation with '…' is not a publishing standard — Chicago Manual §1.42, Bringhurst, New Hart's Rules, and the Penguin / Random House style sheets all specify that long chapter titles in a TOC wrap to additional lines, with the page number and dot leaders aligned with the LAST line of the title. Continuation lines sit flush with the start of the title (no extra indent — keeps the layout clean at narrow trim sizes). Inter-line advance for wrapped entries is tight (tocEntrySize × 1.35) so the lines read as a single item; the gap between entries stays at the full tocRowAdvance. Before drawing each entry, the renderer checks whether the whole wrapped block fits on the current TOC page — if not, it page-breaks first so a wrapped title is never split across pages.",
@@ -1485,14 +1486,32 @@
     //     then a non-digit character. "1.5 million" stays prose because
     //     "1." is followed by a digit. "1.Killing" or "1. The" qualifies
     //     because "1." is followed by a letter.
-    //   - Bulleted: "-", "*", or "•", followed by at least one space, then
-    //     content. Requiring the space avoids treating em-dash attributions
-    //     ("— Helen Hayes") as bullets, and avoids confusing the italic
-    //     marker ("*word*") with a single-asterisk bullet.
+    //   - Bulleted: ASCII "-" or "*" require at least one following space
+    //     (so "*italic*" and em-dash attributions don't match), but unicode
+    //     bullet glyphs (•·‣▪◦●○⦁) only require some content after — they
+    //     are unambiguous list markers.
     const NUMBERED_LIST_LINE = /^\s*\d{1,3}[.)]\s*[^\d\s]/;
-    const BULLETED_LIST_LINE = /^\s*[-*•]\s+\S/;
+    const BULLETED_LIST_LINE = /^\s*(?:[-*]\s+|[•·‣▪◦●○⦁]\s*)\S/;
     function isListLine(line) {
       return NUMBERED_LIST_LINE.test(line) || BULLETED_LIST_LINE.test(line);
+    }
+
+    // Normalise a list-item line so the rendered bullet is consistent
+    // regardless of what the user typed. Trade-book convention (Bringhurst,
+    // New Hart's Rules, Penguin / Random House house style): use the
+    // round bullet "•" (U+2022) at body size. Authors paste from Word,
+    // Google Docs, Apple Notes etc., which insert MIDDLE DOT (·), HYPHEN
+    // (-), ASTERISK (*), or other bullet variants — all get normalised to
+    // "• " + content here so the rendered output is uniform.
+    //
+    // Numbered list markers also get normalised — "1)" becomes "1.",
+    // and any tight spacing like "1.Killing" becomes "1. Killing".
+    function normalizeListMarker(text) {
+      const bm = text.match(/^\s*(?:[-*]\s+|[•·‣▪◦●○⦁]\s*)([\s\S]*)$/);
+      if (bm) return "• " + bm[1].trim();
+      const nm = text.match(/^\s*(\d{1,3})[.)]\s*([\s\S]*)$/);
+      if (nm) return nm[1] + ". " + nm[2].trim();
+      return text;
     }
 
     // Split a chapter body into paragraphs, with three extras over the naïve
@@ -1587,7 +1606,7 @@
       // The isListItem flag is consumed by the renderer to halve the
       // post-paragraph gap.
       if (isListLine(working)) {
-        return { type: "body", text: working, align: align, isListItem: true };
+        return { type: "body", text: normalizeListMarker(working), align: align, isListItem: true };
       }
       return { type: "body", text: working, align: align };
     }
@@ -3560,12 +3579,18 @@
           if (cleaned.startsWith("## ")) body += '  <h2' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(3).trim(), esc) + '</h2>\n';
           else if (cleaned.startsWith("### ")) body += '  <h3' + alignAttr + '>' + inlineMarkdownToHtml(cleaned.slice(4).trim(), esc) + '</h3>\n';
           else {
-            // List items get a class that triggers tighter margin, so
-            // bulleted / numbered lists read as a unit instead of as
-            // separate paragraphs with full inter-paragraph gaps.
-            // Convention: Bringhurst / Chicago / New Hart's.
-            const liClass = isListLine(cleaned) ? ' class="list-item"' : '';
-            body += '  <p' + liClass + alignAttr + '>' + inlineMarkdownToHtml(cleaned, esc) + '</p>\n';
+            // List items get a class that triggers tighter margin, AND
+            // the leading bullet glyph is normalised to "•" so the EPUB
+            // output matches the PDF regardless of what the user typed
+            // (·, -, *, etc.). Convention: Bringhurst / Chicago / New
+            // Hart's — round bullet at body size, uniform across the book.
+            let emitText = cleaned;
+            let liClass = '';
+            if (isListLine(cleaned)) {
+              emitText = normalizeListMarker(cleaned);
+              liClass = ' class="list-item"';
+            }
+            body += '  <p' + liClass + alignAttr + '>' + inlineMarkdownToHtml(emitText, esc) + '</p>\n';
           }
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
