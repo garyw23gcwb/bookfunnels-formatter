@@ -87,7 +87,14 @@
         bodySize: preset.bodySize, 
         lineHeight: preset.lineHeight, 
         paraGap: 5,
-        headerSize: 8, chapterNumSize: 16, chapterTitleSize: 20,
+        // Chapter title at 18pt = 1.8x body (10pt default). Within the
+        // 1.6-1.8x range recommended by Bringhurst / Chicago Manual for
+        // 5x8 trade paperbacks — distinctly larger than body without
+        // dominating the page when titles wrap to 3+ lines.
+        // Epigraph at bodySize - 1 (set per-call in the renderer, not
+        // here) per Bringhurst / Chicago / New Hart's: italic, equal to
+        // or slightly smaller than body — NEVER larger.
+        headerSize: 8, chapterNumSize: 16, chapterTitleSize: 18,
         epigraphSize: 18, dropCapLines: 3,
         // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
         // as a fraction of font size). Gelasio and most serifs sit around 0.72.
@@ -132,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.17",
+      version: "0.13.18",
       date: "2026-05-19",
       changes: [
+        "0.13.18 - Chapter title and epigraph type sizes brought in line with trade-book convention. Three values were out of range: (1) Chapter title 20pt over body 10pt (= 2.0× ratio) sat above the 1.6-1.8× range Bringhurst and Chicago recommend for 5x8 trade paperbacks, and felt heavy when long titles wrapped to 3+ lines. Reduced to 18pt (1.8× — at the upper end of convention, distinctly larger than body but not dominant). Title line advance now derived from chapterTitleSize × 1.4 so leading scales automatically if the size is tuned again. (2) Epigraph 14pt over body 10pt was 1.4× LARGER than body, which violates every house style — Chicago Manual, Bringhurst, New Hart's Rules, Penguin Random House all set epigraphs equal to or 1pt SMALLER than body (italic, indented). Reduced to SPEC.bodySize - 1 (9pt default, 10pt spacious). Line advance dropped from 20pt to ~12pt (size × 1.35), giving the epigraph the same tighter leading you see in published paperbacks. (3) Epigraph horizontal inset from textW - 60 (192pt of 252pt = 76%) to textW - 30 (88%). The previous inset was within convention but combined with the oversized font, the epigraph wrapped to 4+ narrow lines and looked pinched and over-centered. With both font size and inset adjusted, a typical Maslow-length epigraph now sets to 2 lines at a comfortable measure. (4) Attribution font dropped from 12pt to bodySize - 2 (8pt default) — one point smaller than the epigraph, per convention. EPUB matches: p.epigraph 0.9em, p.epigraph-attribution 0.85em, horizontal margin 1.5em instead of 2em. Reader Bonus title scales with chapterTitleSize so it also moves from 20pt to 18pt — its visual hierarchy versus the chapter title stays the same.",
         "0.13.17 - Unquoted epigraphs (text + em-dash attribution) now detected and rendered correctly. Previously the chapter parser only recognised an epigraph when the first content line started with a quote mark (\", ', “). Pasted epigraphs in the form 'One can choose to go back...\\n—Abraham Maslow' fell through to body content, which meant the drop cap on the chapter's first paragraph landed on the epigraph text and the '—Abraham Maslow' line dangled at the left margin as a stray body paragraph. Two changes: (1) detectChapters now has a second detection path that scans the first ~5 content lines after a chapter heading for an attribution-shaped line (em-dash / en-dash / '- ' followed by 1-6 Title-Cased words, optionally + comma + book title, total length < 80 chars). When found, everything before that line becomes the epigraph, and the dashed line becomes the attribution. (2) extractEmbeddedEpigraph runs at render time on every chapter that has no explicit epigraph set, hoisting an embedded epigraph + attribution pair out of the body so EXISTING chapters in autosaved projects render correctly without the user needing to re-detect. Attribution regex tightened to reject dialogue lines that happen to start with an em-dash ('—Are you coming?' → not an attribution because the second word starts lowercase). Both detection paths feed the same downstream renderer, so PDF and EPUB output stay consistent.",
         "0.13.16 - Fix drop cap overlapping body text when the first paragraph is short. The drop cap glyph is sized to span SPEC.dropCapLines (= 3) body lines, but the body rendering only advanced y by lines_drawn × lineHeight after the drop-cap paragraph. If that paragraph wrapped to only 1 or 2 lines (because it was a short sentence, or because v0.13.15's list-line split shortened it), y ended up inside the drop cap's vertical extent — and the next paragraph rendered ON TOP of the drop cap glyph at the left margin. Fix: after rendering the drop-cap paragraph in both passes (pass-1 dry run for the TOC and pass-2 actual render), and in both branches (run-based for paragraphs with inline formatting, hyphenation-aware justified for plain prose), pad y forward by the missing line heights when lines.length < SPEC.dropCapLines. Paragraphs that wrap to 3 or more lines are unchanged. Page counts in the TOC stay accurate because pass 1 applies the same clearance.",
         "0.13.15 - Vertical numbered and bulleted lists now render as vertical lists. Previously a chapter body typed as '1. Foo / 2. Bar / 3. Baz' on three lines with no blank line between them would collapse into a single running prose paragraph at output, because splitChapterBody joined single-newline-separated lines with spaces. Same flow that was already special-casing markdown tables and scene-break ornaments. New isListLine() helper recognises a list item when a line starts with: (a) 1-3 digit number, then '.' or ')', then optional whitespace, then a non-digit character — so '1. The first item' or '1.Killing Control' both qualify but '1.5 million' stays prose because the character after the period is a digit; (b) '-', '*', or '•' followed by at least one space then content — so '- Item' or '* Item' qualify but '*italic*' (no space after the asterisk) and '— Helen Hayes' (em-dash attribution) stay prose. List lines get promoted to their own paragraph in splitChapterBody, which flows through pass-1 dry run, pass-2 PDF render, EPUB chapter loop, and Step 4 preview thumbnail — same single helper, so all four outputs render lists consistently as separate paragraphs. Each item then goes through the normal justified body path. Short items render as a single ragged-right line; long items wrap normally.",
@@ -2576,16 +2584,25 @@
         const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside;
         let y = 55;
         if (ch.num) y += 45;
-        // Title - use same smart wrapping as actual rendering
+        // Title - use same smart wrapping as actual rendering. Line
+        // advance \u2248 1.4 \u00D7 font size matches the leading the actual
+        // render uses.
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
-        y += titleWrapped.length * 28 + 35;
-        // Epigraph
+        const titleLineAdvance = Math.round(SPEC.chapterTitleSize * 1.4);
+        y += titleWrapped.length * titleLineAdvance + 35;
+        // Epigraph \u2014 italic, slightly smaller than body, attribution
+        // smaller still. Wrap width is textW - 30 (15pt inset each
+        // side) for a modest visual indent.
         if (ch.epigraph) {
-          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
-          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW - 60);
-          y += epLines.length * 20;
-          if (ch.epigraphAttribution) y += 20;
-          y += 30;
+          const epSize = SPEC.bodySize - 1;
+          const epLineAdvance = Math.round(epSize * 1.35);
+          const atSize = SPEC.bodySize - 2;
+          const atLineAdvance = Math.round(atSize * 1.35);
+          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
+          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW - 30);
+          y += epLines.length * epLineAdvance;
+          if (ch.epigraphAttribution) y += 5 + atLineAdvance;
+          y += 25;
         } else { y += 25; }
         return y;
       }
@@ -2723,27 +2740,38 @@
           y += 45;
         }
 
-        // Chapter title
+        // Chapter title \u2014 line advance derived from font size (\u2248 1.4\u00D7)
+        // so leading scales when the title size is tuned in SPEC.
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(SPEC.chapterTitleSize);
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
-        for (const line of titleWrapped) { doc.text(line, getCenterX(), y, { align: "center" }); y += 28; }
+        const titleLineAdvance = Math.round(SPEC.chapterTitleSize * 1.4);
+        for (const line of titleWrapped) { doc.text(line, getCenterX(), y, { align: "center" }); y += titleLineAdvance; }
         y += 35;
 
-        // Epigraph
+        // Epigraph \u2014 typeset per Chicago / Bringhurst / New Hart's
+        // convention: italic, set in a slightly smaller measure than body
+        // (bodySize - 1), centered, with a modest horizontal inset
+        // (textW - 30). Attribution one point smaller still. Quote marks
+        // kept; some house styles drop them, but italics + size are not
+        // always enough signal in a reflowable PDF.
         if (ch.epigraph) {
-          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(14);
+          const epSize = SPEC.bodySize - 1;
+          const epLineAdvance = Math.round(epSize * 1.35);
+          const atSize = SPEC.bodySize - 2;
+          const atLineAdvance = Math.round(atSize * 1.35);
+          doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
           const epText = "\u201C" + ch.epigraph + "\u201D";
-          const epLines = wrapText(epText, textW - 60, 14, "italic");
-          for (const line of epLines) { doc.text(line, getCenterX(), y, { align: "center" }); y += 20; }
-          if (ch.epigraphAttribution) { 
-            y += 5; 
-            doc.setFontSize(12); 
-            doc.text("\u2013 " + ch.epigraphAttribution, getCenterX(), y, { align: "center" }); 
-            y += 15; 
+          const epLines = wrapText(epText, textW - 30, epSize, "italic");
+          for (const line of epLines) { doc.text(line, getCenterX(), y, { align: "center" }); y += epLineAdvance; }
+          if (ch.epigraphAttribution) {
+            y += 5;
+            doc.setFontSize(atSize);
+            doc.text("\u2013 " + ch.epigraphAttribution, getCenterX(), y, { align: "center" });
+            y += atLineAdvance;
           }
-          y += 30;
-        } else { 
-          y += 25; 
+          y += 25;
+        } else {
+          y += 25;
         }
 
         // Body text with drop cap on first paragraph. Same splitter as
@@ -3219,7 +3247,10 @@
         'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-after: avoid; break-after: avoid; }',
         'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; page-break-after: avoid; break-after: avoid; }',
         'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
-        'p.epigraph { font-style: italic; margin: 1.5em 2em; text-align: center; }',
+        // Epigraph — Chicago / Bringhurst / New Hart's: italic, equal to
+        // or slightly smaller than body, modest horizontal indent. 0.9em
+        // matches the PDF's bodySize - 1pt sizing.
+        'p.epigraph { font-style: italic; font-size: 0.9em; margin: 1.5em 1.5em; text-align: center; }',
         // Centered block image (body image markers ![alt](img-id))
         'p.figure { text-align: center; margin: 1.5em 0; }',
         'p.figure img { max-width: 100%; height: auto; }',
@@ -3235,7 +3266,8 @@
         // Scene break ornament: three centered asterisks separated by spaces,
         // wide breathing room above and below to read clearly as a transition.
         'p.scene-break { text-align: center; margin: 1.8em 0; letter-spacing: 0.5em; }',
-        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 2em 2em; font-size: 0.95em; }',
+        // Attribution 1pt smaller still per convention.
+        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 1.5em 2em; font-size: 0.85em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
         // When there is no chapter-num (named section), h1 is the page opener. A dedicated
