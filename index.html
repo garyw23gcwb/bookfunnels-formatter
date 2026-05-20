@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.24",
+      version: "0.13.25",
       date: "2026-05-19",
       changes: [
+        "0.13.25 - Subheadings no longer orphan at the foot of a page. Trade-book convention (Chicago Manual §1.66, Bringhurst, New Hart's Rules) requires at least 2 lines of body text beneath a subheading on the same page; Penguin Random House prefers 3. The previous H2/H3 smart break reserved 2 body lines below — but the body paragraph's own widow control (WIDOW_ORPHAN.minLinesAtPageEnd = 2) then triggered, pushing the entire body paragraph to the next page and orphaning the heading. Fix: bump the heading's reservation from 2 to 3 body lines so the widow control no longer fires. Smarter still — peek at the next paragraph's wrapped line count and reserve MIN(3, nextParagraphLines), so a heading followed by a naturally-short 1- or 2-line paragraph doesn't get pushed forward unnecessarily. Headings that are the final block of a chapter (no body to follow) require zero reservation. Applied to both pass-1 calcBodyPages (dry run, for accurate TOC) and pass-2 render so they stay in lockstep.",
         "0.13.24 - Runtime fallback that recovers bullet lists in chapter bodies that arrived bullet-less. v0.13.23 fixed the paste handler so future <ul><li> pastes preserve their bullets — but chapters already pasted before v0.13.23 still have their list items sitting as bullet-less plain paragraphs, and users were reporting 'some bullets still not rendering' after the fix. New helpers looksLikeImplicitBullet() and promoteImplicitBulletRuns() walk the paragraph array returned by splitChapterBody; whenever 3+ consecutive paragraphs match the profile of a list item (1-80 chars, starts with capital, no terminal .!?:;, at least 3 words, not already a list / heading / table / scene break / alignment-prefixed), prepend '• ' to each so the downstream classifier picks them up. 3+ is the floor — two short lines in a row could be ordinary prose, three is the convention threshold for 'list' in trade typography. Word-count gate excludes one-word dialogue ('Yes' / 'No' / 'Maybe'); capital-letter gate excludes mid-sentence continuation. Existing chapter content gets fixed at render time without re-pasting.",
         "0.13.23 - Paste-from-Word/Docs bullet lists no longer lose their bullets. htmlToMarkdownLite's <li> handler was emitting just the inner text with a single \\n between items — the bullet glyph was silently stripped, so a copied semantic <ul><li>A</li><li>B</li></ul> arrived in the editor as four bullet-less lines that the list detector then couldn't see. New handlers: <ul> walks its direct <li> children and emits each as '• content\\n\\n'; <ol> emits 'N. content\\n\\n' with N incrementing from the start attribute (default 1); orphaned <li> outside a list container defaults to bullet rather than dropping the marker. Each item ends with a paragraph break so splitChapterBody sees individual items and classifyParagraph + normalizeListMarker take over from there. To fix CURRENT projects whose lists already arrived bullet-less, re-paste the affected section from Word / Docs once v0.13.23 is loaded — the new handler will restore the bullets.",
         "0.13.22 - Bullet glyphs normalised to the trade-book standard • (U+2022) at body size. Authors paste from Word / Google Docs / Apple Notes / browsers, each of which inserts a different default bullet — most commonly the small MIDDLE DOT (·, U+00B7), which renders as a tiny mid-line dot in Gelasio at 10pt. The user reported bullets looking like 'tiny little dots' rather than visible round bullets. Trade-book convention (Bringhurst, New Hart's Rules, Penguin / Random House) is a uniform round • bullet at body size, set by the typesetter regardless of what the manuscript used. New helper normalizeListMarker() runs at classify time and rewrites any leading bullet character (- * • · ‣ ▪ ◦ ● ○ ⦁) to '• ' followed by the content. Numbered markers are also normalised — '1)' becomes '1.', and tight spacing like '1.Killing' becomes '1. Killing'. BULLETED_LIST_LINE regex now also recognises U+00B7 and other unicode bullet glyphs (previously only -, *, •), so middle-dot lists from Word paste correctly trigger list-item detection. PDF (via classifyParagraph), EPUB (via the chapter loop), and the Step 4 preview thumbnail all share the same normalisation, so the rendered output is consistent across all three formats.",
@@ -2646,17 +2647,23 @@
             continue;
           }
 
-          // H2 / H3 headings. Smart break: never let a heading dangle alone at
-          // the bottom of a page — reserve ~2 body lines beneath it.
+          // H2 / H3 headings. Smart break: never let a heading dangle at
+          // the foot of a page. Trade-book convention (Chicago Manual
+          // §1.66, Bringhurst, New Hart's Rules) requires AT LEAST 2 lines
+          // of body text beneath a subheading on the same page. Penguin
+          // Random House and most modern trade publishers prefer 3 — and
+          // we need 3 to clear our own body-paragraph widow control
+          // (WIDOW_ORPHAN.minLinesAtPageEnd = 2), which would otherwise
+          // see 2 lines at page end and push the WHOLE body paragraph to
+          // the next page, orphaning the heading.
+          //
+          // Smart reservation: peek at the next paragraph's wrapped line
+          // count. We need to fit MIN(3, nextParagraphLines) body lines on
+          // the same page as the heading. A short 1-2 line paragraph that
+          // would entirely fit doesn't trigger the 3-line floor.
           if (cls.type === "h2" || cls.type === "h3") {
             const subSize = cls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
             const subLineHeight = subSize * 1.35;
-            // Heading gaps expressed as a fraction of body lineHeight so the
-            // proportions scale with the body-size preset. Target visual
-            // ratio (above : below) ≈ 2 : 1 — Penguin / Random House / Chicago
-            // Manual convention. Note the previous body paragraph already
-            // adds SPEC.paraGap (~5pt) below itself, so the EFFECTIVE above
-            // gap is gapAbove + paraGap.
             const gapAbove = cls.type === "h2" ? SPEC.lineHeight * 0.65 : SPEC.lineHeight * 0.5;
             const gapBelow = cls.type === "h2" ? SPEC.lineHeight * 0.55 : SPEC.lineHeight * 0.4;
             doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
@@ -2670,7 +2677,24 @@
             } else {
               subLineCount = doc.splitTextToSize(cls.text, textW).length;
             }
-            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * 2);
+
+            // Peek at the next paragraph to determine how many body lines
+            // we need beneath this heading. Floor of 3 (clears widow
+            // control), capped at the next paragraph's actual line count.
+            let bodyLinesNeeded = 3;
+            if (pi + 1 < paragraphs.length) {
+              const nextCls = classifyParagraph(paragraphs[pi + 1]);
+              if (nextCls.type === "body" && nextCls.text) {
+                doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
+                const nextWrapped = doc.splitTextToSize(nextCls.text, textW);
+                bodyLinesNeeded = Math.min(3, nextWrapped.length);
+                doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+              }
+              // Headings, tables, images, scene breaks: keep default 3
+            } else {
+              bodyLinesNeeded = 0; // heading is the last block; no body below
+            }
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * bodyLinesNeeded);
 
             if (y + needed > maxY) {
               pages++; y = bodyTopY();
@@ -3158,18 +3182,16 @@
             continue;
           }
 
-          // H2 / H3 headings. Reserve at least 2 body lines beneath so the
-          // heading does not dangle alone at the bottom of a page.
+          // H2 / H3 headings. Smart break must stay in lockstep with
+          // calcBodyPages — same MIN(3, nextParagraphLines) reservation
+          // formula. Trade-book convention (Chicago Manual §1.66,
+          // Bringhurst, New Hart's): a subheading needs at least 2 body
+          // lines beneath; we require 3 so the body's own widow control
+          // (minLinesAtPageEnd = 2) doesn't fire and push the body
+          // paragraph forward, orphaning the heading.
           if (cls.type === "h2" || cls.type === "h3") {
             const subSize = cls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
             const subLineHeight = subSize * 1.35;
-            // Heading gaps expressed as a fraction of body lineHeight so the
-            // proportions scale with the body-size preset. Target visual
-            // ratio (above : below) ≈ 2 : 1 — Penguin / Random House / Chicago
-            // Manual convention. Note the previous body paragraph already
-            // adds SPEC.paraGap (~5pt) below itself, so the EFFECTIVE above
-            // gap is gapAbove + paraGap. Must stay in lockstep with the
-            // dry-run computation in calcBodyPages.
             const gapAbove = cls.type === "h2" ? SPEC.lineHeight * 0.65 : SPEC.lineHeight * 0.5;
             const gapBelow = cls.type === "h2" ? SPEC.lineHeight * 0.55 : SPEC.lineHeight * 0.4;
 
@@ -3188,7 +3210,23 @@
               plainSubLines = doc.splitTextToSize(cls.text, textW);
             }
             const subLineCount = (runSubLines || plainSubLines).length;
-            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * 2);
+
+            // Peek at the next paragraph to size the body-line reservation.
+            // MUST mirror the same calculation in calcBodyPages so the dry
+            // run and the actual render agree on page boundaries.
+            let bodyLinesNeeded = 3;
+            if (pi + 1 < paragraphs.length) {
+              const nextCls = classifyParagraph(paragraphs[pi + 1]);
+              if (nextCls.type === "body" && nextCls.text) {
+                doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
+                const nextWrapped = doc.splitTextToSize(nextCls.text, textW);
+                bodyLinesNeeded = Math.min(3, nextWrapped.length);
+                doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+              }
+            } else {
+              bodyLinesNeeded = 0;
+            }
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * bodyLinesNeeded);
 
             if (y + needed > maxY) {
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
