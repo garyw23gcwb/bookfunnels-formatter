@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.32",
+      version: "0.13.33",
       date: "2026-05-19",
       changes: [
+        "0.13.33 - Chapter prefixes in TOC + Roman/Arabic split between front matter and main matter, per Chicago Manual §1.5-1.6 / Penguin / Random House / KDP / IngramSpark convention. Numbered chapters (matched against the 'Chapter N' patterns in detectChapters) now render with a 'Chapter 1: ', 'Chapter 2: ' prefix in both the PDF TOC and the EPUB nav. Front matter sections — Introduction, Who Should Read This Book?, Our/My Promise to You, and any section appearing before the first numbered chapter — render by title only with no prefix. Page numbering also splits: front matter uses lowercase Roman folios (i, ii, iii…), main matter restarts at Arabic 1 on the first numbered chapter. Back matter (already flagged includeInToc:false) continues Arabic from where main matter ended. New helpers toRoman(n) and formatPageNum(n, style) at module scope. addPageNumber reads a closure-scoped currentPageStyle that's updated at the top of every chapter render. Pass 1 page-counting tracks displayPage + inMainMatter state and stores per-chapter style in chapterStyles[]; pass 2 consults the same array. Parity rule (chapters start on recto = odd display page) preserved within each phase. The transitional blank verso between Roman and Arabic — when the last Roman page lands on a recto — is handled at render time by the existing isRecto() check.",
         "0.13.32 - TOC wrapped-title continuation lines now hang-indented (~1em). When a long chapter title wraps to a second line in the table of contents, trade-book convention (Chicago Manual §1.43, Bringhurst, New Hart's Rules, Penguin / Random House style) requires the SECOND and subsequent lines to be indented from the title's start so they visually attach to the first line as part of the same entry. Previously v0.13.19's wrap produced continuation lines flush at tocTextX, which made 'Business' on line 2 of 'What It Really Takes to Build an E-commerce / Business ........ 19' look like it could be a separate entry. Fix: line 0 stays at tocTextX (title start); lines 1+ render at tocTextX + tocWrapIndent (1.2 × tocEntrySize ≈ 12pt for 10pt body). Dot leaders and page number still right-align to the page-number column on the last line. Single-line entries are unaffected.",
         "0.13.31 - Subheading orphan prevention made robust. v0.13.25 reserved MIN(3, nextBodyLines) — but that didn't account for the body's own widow/orphan control (minLinesAtPageStart / minLinesAtPageEnd = 2). For a 4- or 5-line body paragraph following a heading, reserving only 3 lines left 1-2 lines remaining, which triggered the widow check and pushed the whole paragraph to the next page — orphaning the heading. The default 3-line reservation was also wrong when the next block was another heading, a table, an image, or a scene break (each of which needs more vertical space than 3 body lines). New reservation rules: (a) body next, N ≤ 5: reserve N lines (fit all, no widow trigger); (b) body next, N ≥ 6: reserve 3 (remaining ≥ 3 is above widow threshold); (c) heading next: reserve heading height + 3 body lines for ITS reservation; (d) scene break next: 3 line-heights; (e) table next: 5 line-heights (header + 2 rows); (f) image next: 6 line-heights. List items in the next-paragraph check are wrapped at the narrower hanging-indent width (textW - 25) so line count matches the actual list-item renderer output. Applied to both pass-1 calcBodyPages and pass-2 render so TOC stays accurate. All five subheading orphan cases the user could spot in trade output are now blocked.",
         "0.13.30 - Back-matter chapters (About the Author, Acknowledgments, etc.) no longer reserve a 25pt epigraph placeholder gap below their title. Trade-book convention (Chicago Manual §1.78-1.81, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark) sets end-matter sections more modestly than main chapters — no epigraph zone, smaller title-to-body gap. Previously every chapter, including back matter, allocated 35pt post-title + 25pt empty-epigraph placeholder = 60pt of dead space between the chapter title and the body content. On an About the Author page with an embedded photo, that gap made the photo float ~75pt below the title with no visual reason. Detection reuses the existing isLikelyBackMatter() / ch.includeInToc === false flag set at chapter-detection time (matches About the Author, About the Authors, Acknowledgments, Bibliography, Index, Colophon, Appendix, etc.). For back-matter chapters: post-title gap is 20pt instead of 35pt, and the empty-epigraph placeholder (25pt) is skipped entirely. Net reduction: ~40pt of dead space removed. Back matter that genuinely has an epigraph still renders it normally; only the no-epigraph placeholder is dropped. Mirrors in pass-1 calcOpeningHeight so the TOC stays accurate. Same flag already gates drop-cap skipping (v0.12.8); now it also gates epigraph-placeholder skipping — consistent treatment of back-matter pages.",
@@ -1088,6 +1089,27 @@
       if (!m) return null;
       const idx = para.indexOf(m[0]);
       return { letter: m[0].toUpperCase(), rest: para.slice(idx + 1) };
+    }
+
+    // Lowercase Roman numeral conversion for front-matter page folios.
+    // Trade-book convention (Chicago Manual §1.5-1.6, Penguin / Random House,
+    // KDP / IngramSpark): front matter (foreword, preface, introduction,
+    // and sections appearing before the first numbered chapter) uses
+    // lowercase Roman page numbers; main matter (numbered chapters
+    // onwards) restarts at Arabic 1.
+    function toRoman(n) {
+      if (!n || n < 1) return "";
+      const M = ["", "m", "mm", "mmm"];
+      const C = ["", "c", "cc", "ccc", "cd", "d", "dc", "dcc", "dccc", "cm"];
+      const X = ["", "x", "xx", "xxx", "xl", "l", "lx", "lxx", "lxxx", "xc"];
+      const I = ["", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"];
+      const v = Math.max(1, Math.floor(n));
+      return M[Math.floor(v / 1000)] + C[Math.floor((v % 1000) / 100)] +
+             X[Math.floor((v % 100) / 10)] + I[v % 10];
+    }
+
+    function formatPageNum(n, style) {
+      return (style === "roman") ? toRoman(n) : String(n);
     }
 
     // Back-matter detection. Returns true for chapter titles that are
@@ -2146,11 +2168,18 @@
         else { doc.text(bookData.title, m.inside, m.top + SPEC.headerSize); }
       }
 
+      // Current chapter's page-number style. Updated at the top of each
+      // chapter render (and at TOC render time). Front matter sections —
+      // chapters before the first numbered chapter — render Roman folios;
+      // numbered chapters and beyond render Arabic. Chicago Manual §1.5
+      // convention.
+      let currentPageStyle = "arabic";
       function addPageNumber(num) {
         const m = getMargins();
         doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
-        if (isRecto()) { doc.text(String(num), SPEC.pageW - m.outside, SPEC.pageNumY, { align: "right" }); }
-        else { doc.text(String(num), m.inside, SPEC.pageNumY); }
+        const s = formatPageNum(num, currentPageStyle);
+        if (isRecto()) { doc.text(s, SPEC.pageW - m.outside, SPEC.pageNumY, { align: "right" }); }
+        else { doc.text(s, m.inside, SPEC.pageNumY); }
       }
 
       function wrapText(text, maxWidth, fontSize, fontStyle) {
@@ -2881,19 +2910,43 @@
         return y;
       }
 
-      // PASS 1: Calculate page numbers
+      // PASS 1: Calculate page numbers + numbering style per chapter.
+      //
+      // Trade-book convention (Chicago Manual §1.5-1.6, Penguin / Random
+      // House, KDP / IngramSpark): front matter (chapters appearing
+      // before the first numbered chapter) uses lowercase Roman folios;
+      // main matter (numbered chapters + back matter that follows) uses
+      // Arabic. The Arabic counter restarts at 1 on the first numbered
+      // chapter. Detection: ch.num is set on chapters parsed via the
+      // "Chapter N" patterns, empty on sections like "Introduction" or
+      // "Who Should Read This Book?".
+      //
+      // Parity rule (chapters start on recto = odd display page) holds
+      // within each phase. The transitional blank verso between Roman
+      // and Arabic (when Roman ends on a recto) is handled at render
+      // time by the existing isRecto() check in pass 2.
       const chapterPageNumbers = [];
-      let currentArabicPage = 1;
-      
+      const chapterStyles = [];
+      let displayPage = 1;
+      let inMainMatter = false;
+
       for (let ci = 0; ci < chapters.length; ci++) {
         const ch = chapters[ci];
-        // Chapters start on odd pages
-        if (currentArabicPage % 2 === 0) currentArabicPage++;
-        chapterPageNumbers.push(currentArabicPage);
-        
+        if (ch.num && !inMainMatter) {
+          // Transition: first numbered chapter — reset to Arabic 1
+          // (always odd = recto, so no parity bump needed).
+          inMainMatter = true;
+          displayPage = 1;
+        } else if (displayPage % 2 === 0) {
+          // Within current phase: force recto start
+          displayPage++;
+        }
+        chapterPageNumbers.push(displayPage);
+        chapterStyles.push(inMainMatter ? "arabic" : "roman");
+
         const openingY = calcOpeningHeight(ch);
         const bodyPages = calcBodyPages(ch, openingY);
-        currentArabicPage += bodyPages;
+        displayPage += bodyPages;
       }
 
       // ---- PASS 2: RENDER TOC WITH CORRECT PAGE NUMBERS ----
@@ -2927,7 +2980,8 @@
       let maxPageNumWidth = 0;
       for (let i = 0; i < chapters.length; i++) {
         if (chapters[i].includeInToc === false) continue;
-        const w = doc.getTextWidth(String(chapterPageNumbers[i]));
+        const pn = formatPageNum(chapterPageNumbers[i], chapterStyles[i]);
+        const w = doc.getTextWidth(pn);
         if (w > maxPageNumWidth) maxPageNumWidth = w;
       }
 
@@ -2944,8 +2998,16 @@
         const ch = chapters[i];
         if (ch.includeInToc === false) continue;
         // In the real book TOC, titles are shown without "Chapter X:" prefix
-        const displayTitle = ch.title || ch.num;
-        const pageNumStr = String(chapterPageNumbers[i]);
+        // Numbered chapters get a "Chapter N: " prefix in the TOC.
+        // Front matter sections (Introduction, Who Should Read..., etc.)
+        // and back-matter sections are shown by title only. Trade-book
+        // convention varies but instructional / practical books like
+        // tinybooks benefit from numbered prefixes for navigation.
+        const baseTitle = ch.title || ch.num || "";
+        const displayTitle = (ch.num && baseTitle)
+          ? (ch.num + ": " + baseTitle)
+          : baseTitle;
+        const pageNumStr = formatPageNum(chapterPageNumbers[i], chapterStyles[i]);
 
         doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
 
@@ -3021,6 +3083,12 @@
         if (!isRecto()) newPage();
         
         bookPageNum = chapterPageNumbers[ci];
+        // Switch the folio rendering style (Roman vs Arabic) to match this
+        // chapter's section. Front matter sections render lowercase Roman;
+        // numbered chapters and beyond render Arabic. addPageNumber reads
+        // this closure variable, so every page-number draw in this chapter
+        // formats correctly.
+        currentPageStyle = chapterStyles[ci] || "arabic";
         // textX/textW are mutable across the chapter render because the
         // mirrored verso/recto margins flip the text-block X position on
         // every page boundary. They MUST be re-captured after every
@@ -3946,7 +4014,13 @@
         }
         const fname = "chapter-" + String(ci + 1).padStart(3, "0") + ".xhtml";
         oebps.file(fname, xhtmlDoc(ch.title || ("Chapter " + (ci + 1)), body));
-        chapterFiles.push({ file: fname, title: ch.title || ch.num || ("Chapter " + (ci + 1)), includeInToc: ch.includeInToc !== false });
+        // For the EPUB navigation TOC, prefix numbered chapters with
+        // "Chapter N: " — same convention as the PDF TOC. Front matter
+        // and back matter sections (no ch.num) show the title alone.
+        const navTitle = ch.num && ch.title
+          ? (ch.num + ": " + ch.title)
+          : (ch.title || ch.num || ("Chapter " + (ci + 1)));
+        chapterFiles.push({ file: fname, title: navTitle, includeInToc: ch.includeInToc !== false });
       }
 
       // Write image bytes and collect manifest entries for every referenced
