@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.28",
+      version: "0.13.29",
       date: "2026-05-19",
       changes: [
+        "0.13.29 - Bulleted and numbered lists now use proper hanging indentation per trade-book convention (Chicago Manual §6.130-6.135, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark). Previously bullets sat flush at the body margin with continuation lines wrapping back to the bullet's x position — visually squashed and inconsistent with published trade typography. New layout: list block indented 14pt from the body margin, bullet hangs at the indent point with 6pt of breathing room before body text starts, and wrapped continuation lines align with the BODY TEXT (not the bullet). This is the 'hanging indent' pattern every major style authority specifies. Render path: a new list-item branch in pass 2 extracts the standardised bullet/number prefix, measures it dynamically, computes bulletX = textX + 14 and bodyX = bulletX + bulletWidth + 6, wraps body content at the narrower hanging-indent width (textW - 14 - bulletWidth - 6), and draws each line with the bullet only on the first line. Mirror logic in pass 1 calcBodyPages so TOC page counts stay accurate. EPUB matches: p.list-item gets padding-left:1.5em + text-indent:-1em for the hanging effect. Tight inter-item spacing (half SPEC.paraGap) from v0.13.20 preserved.",
         "0.13.28 - Running headers and page numbers switched from Inter (sans-serif) to Gelasio (the body face), with the header set in italic. Trade-book convention (Chicago Manual §1.62-1.64, Bringhurst, New Hart's Rules, KDP / IngramSpark, and the actual practice of Penguin / Random House / Knopf paperbacks): running heads and folios sit in the SAME serif family as the body, smaller and often in italic or small caps. Sans-serif headers exist as a deliberate 'modern nonfiction' choice (some Crown / O'Reilly titles) but are not the default — for trade typography they read as a clash, especially in a focused, instructional tinybook. Header now uses BODY_FONT italic at SPEC.headerSize (8pt); folio uses BODY_FONT regular at the same size. Color and position unchanged. EPUB doesn't have fixed running headers / folios (reflowable) so no EPUB change needed.",
         "0.13.27 - Margins, page number position, and body-to-folio gap brought into line with 5x8 trade-paperback industry standard (KDP / IngramSpark / Bringhurst). Audit findings: (1) Top margin was 24pt = 0.33\", below the 0.5-0.625\" recommended range — bumped to 36pt (0.5\"). (2) Bottom margin was 30pt = 0.42\", below the 0.5-0.75\" range — bumped to 42pt (0.58\"). (3) Visible gap from body's last line down to the page number was ~11pt — well under the 22-30pt (1.5-2 body lines) convention. Body's maxY moved from pageH-50 to pageH-65 in both passes (calcBodyPages dry-run and pass-2 render) and pageNumY moved from 546 to 552 (24pt above the page bottom edge). Net effect: visible gap from last body line to page number is now ~30pt — clear breathing room without wasted space. Horizontal margins (outer 42pt = 0.58\", inner gutter 66pt = 0.92\") were already within range and unchanged — they still mirror correctly verso↔recto with the larger 66pt margin always sitting on the spine side.",
         "0.13.26 - Epigraph type bumped from bodySize - 1 to bodySize (matches modern Penguin / Knopf / HarperCollins house style). The strict 19th-century Chicago / Bringhurst rule sets epigraphs 1-2pt smaller than body, but the visual subordination from italic + horizontal indent is enough on its own — body-size epigraphs read with real presence and don't look pinched against the surrounding 10pt body. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8x), epigraph 10pt (1.0x — same as body, italic + indented), body 10pt, attribution 9pt (0.9x — one point smaller than epigraph). Scales correctly for Spacious preset: epigraph 11pt, attribution 10pt. EPUB CSS lifted to match: p.epigraph 1em (was 0.9em), p.epigraph-attribution 0.9em (was 0.85em).",
@@ -2729,6 +2730,36 @@
             continue;
           }
 
+          // List item with hanging indent — mirrors the pass-2 logic so
+          // the TOC page count matches the rendered output.
+          if (cls.type === "body" && cls.isListItem) {
+            const LIST_INDENT = 14;
+            const LIST_TEXT_GAP = 6;
+            let prefix, content;
+            const bm = para.match(/^(•)\s+([\s\S]*)$/);
+            const nm = para.match(/^(\d{1,3}\.)\s+([\s\S]*)$/);
+            if (bm) { prefix = bm[1]; content = bm[2]; }
+            else if (nm) { prefix = nm[1]; content = nm[2]; }
+            else { prefix = "•"; content = para; }
+
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
+            const bulletWidth = doc.getTextWidth(prefix);
+            const listBodyW = textW - LIST_INDENT - bulletWidth - LIST_TEXT_GAP;
+            let listLineCount;
+            if (containsFormatting(content)) {
+              const runs = parseInlineRuns(content);
+              listLineCount = layoutRunsMixed(doc, runs, listBodyW, SPEC.bodySize, BODY_FONT).length;
+            } else {
+              listLineCount = doc.splitTextToSize(content, listBodyW).length;
+            }
+            for (let _i = 0; _i < listLineCount; _i++) {
+              if (y > maxY) { pages++; y = bodyTopY(); }
+              y += SPEC.lineHeight;
+            }
+            y += Math.round(SPEC.paraGap / 2);
+            continue;
+          }
+
           // Regular body paragraph. When the paragraph is aligned (left /
           // center / right) it skips justification and the hyphenation-aware
           // breaker — use doc.splitTextToSize, exactly as Pass 2 does.
@@ -3296,6 +3327,77 @@
             continue;
           }
 
+          // Bulleted / numbered list item with HANGING INDENT. Trade-book
+          // convention (Chicago Manual §6.130-6.135, Bringhurst, New
+          // Hart's, Penguin / Random House style sheets, KDP /
+          // IngramSpark): the list is indented from the body margin, the
+          // bullet hangs at the indent point, and wrapped continuation
+          // lines align with the body text — NOT with the bullet. That
+          // way a multi-line item reads as a single block instead of
+          // letting the second line fall back into the body margin.
+          //
+          // Layout:
+          //   [textX] ──14pt── [bullet] ─ bulletWidth ─ 6pt ─ [body text]
+          //                                                   ↑ wrapped
+          //                                                   lines align
+          if (cls.type === "body" && cls.isListItem) {
+            const LIST_INDENT = 14;     // ~0.19" block indent from body margin
+            const LIST_TEXT_GAP = 6;    // space between bullet and body text
+
+            // Extract the standardised bullet/number prefix (normalizeListMarker
+            // ensures the form is "• content" or "N. content").
+            let prefix, content;
+            const bm = para.match(/^(•)\s+([\s\S]*)$/);
+            const nm = para.match(/^(\d{1,3}\.)\s+([\s\S]*)$/);
+            if (bm) { prefix = bm[1]; content = bm[2]; }
+            else if (nm) { prefix = nm[1]; content = nm[2]; }
+            else { prefix = "•"; content = para; }
+
+            doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize); doc.setTextColor(30);
+            const bulletWidth = doc.getTextWidth(prefix);
+            const bodyW = textW - LIST_INDENT - bulletWidth - LIST_TEXT_GAP;
+
+            // Wrap the body content at the narrower hanging-indent width.
+            // Honour inline formatting if present.
+            let contentLines;
+            let useRuns = false;
+            if (containsFormatting(content)) {
+              const runs = parseInlineRuns(content);
+              contentLines = layoutRunsMixed(doc, runs, bodyW, SPEC.bodySize, BODY_FONT);
+              useRuns = true;
+            } else {
+              contentLines = doc.splitTextToSize(content, bodyW);
+            }
+
+            let bulletDrawn = false;
+            for (let li = 0; li < contentLines.length; li++) {
+              if (y > maxY) {
+                newPage(); pagesUsed++;
+                addRunningHeader(ch.title || ch.num || "");
+                addPageNumber(bookPageNum + pagesUsed);
+                y = bodyTopY(); resetBodyFont(); textX = getTextX(); textW = getTextWidth();
+                // No bullet on continuation page — convention is bullet
+                // appears once, on the first line of the item.
+              }
+              const bulletX = textX + LIST_INDENT;
+              const bodyX = bulletX + bulletWidth + LIST_TEXT_GAP;
+              if (!bulletDrawn) {
+                doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
+                doc.text(prefix, bulletX, y + BASELINE_OFFSET);
+                bulletDrawn = true;
+              }
+              if (useRuns) {
+                drawRunLine(doc, contentLines[li], bodyX, y + BASELINE_OFFSET, SPEC.bodySize, BODY_FONT);
+              } else {
+                doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
+                doc.text(contentLines[li], bodyX, y + BASELINE_OFFSET);
+              }
+              y += SPEC.lineHeight;
+            }
+            y += Math.round(SPEC.paraGap / 2);  // tight inter-item spacing
+            continue;
+          }
+
           // Aligned body paragraph (cls.align is left / center / right).
           // Aligned text skips justification entirely — ragged on the
           // non-aligned side, no hyphenation. Mirrors the dry-run logic
@@ -3485,10 +3587,16 @@
         'h1 { font-size: 1.8em; font-weight: bold; text-align: center; margin: 2em 0 1em; page-break-after: avoid; break-after: avoid; }',
         'h2 { font-size: 1.25em; font-weight: bold; margin: 1.8em 0 0.5em; page-break-after: avoid; break-after: avoid; }',
         'p { margin: 0 0 0.6em; text-align: justify; text-indent: 0; }',
-        // List items render at body size but with tighter bottom margin
-        // so consecutive bullets / numbered items read as a unit rather
-        // than separate paragraphs. Matches the PDF (half SPEC.paraGap).
-        'p.list-item { margin: 0 0 0.25em; }',
+        // List items: hanging indent layout matching the PDF. The list
+        // block is indented from the body margin, the bullet glyph sits
+        // at the indent point, body text starts past the bullet, and
+        // wrapped continuation lines align with the body text (not the
+        // bullet). text-indent: -1em pulls the bullet back into the
+        // padding zone so it hangs into the indent. Trade-book convention
+        // (Chicago §6.130-6.135, Bringhurst, New Hart's, Penguin / Random
+        // House style). Tight bottom margin keeps consecutive items as a
+        // visual unit.
+        'p.list-item { margin: 0 0 0.25em; padding-left: 1.5em; text-indent: -1em; }',
         // Epigraph — italic at body size (matches modern Penguin / Knopf /
         // HarperCollins house style). Italic + horizontal indent gives
         // visual subordination without making the epigraph hard to read.
