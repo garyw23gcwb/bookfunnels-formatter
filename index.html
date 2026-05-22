@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.29",
+      version: "0.13.30",
       date: "2026-05-19",
       changes: [
+        "0.13.30 - Back-matter chapters (About the Author, Acknowledgments, etc.) no longer reserve a 25pt epigraph placeholder gap below their title. Trade-book convention (Chicago Manual §1.78-1.81, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark) sets end-matter sections more modestly than main chapters — no epigraph zone, smaller title-to-body gap. Previously every chapter, including back matter, allocated 35pt post-title + 25pt empty-epigraph placeholder = 60pt of dead space between the chapter title and the body content. On an About the Author page with an embedded photo, that gap made the photo float ~75pt below the title with no visual reason. Detection reuses the existing isLikelyBackMatter() / ch.includeInToc === false flag set at chapter-detection time (matches About the Author, About the Authors, Acknowledgments, Bibliography, Index, Colophon, Appendix, etc.). For back-matter chapters: post-title gap is 20pt instead of 35pt, and the empty-epigraph placeholder (25pt) is skipped entirely. Net reduction: ~40pt of dead space removed. Back matter that genuinely has an epigraph still renders it normally; only the no-epigraph placeholder is dropped. Mirrors in pass-1 calcOpeningHeight so the TOC stays accurate. Same flag already gates drop-cap skipping (v0.12.8); now it also gates epigraph-placeholder skipping — consistent treatment of back-matter pages.",
         "0.13.29 - Bulleted and numbered lists now use proper hanging indentation per trade-book convention (Chicago Manual §6.130-6.135, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark). Previously bullets sat flush at the body margin with continuation lines wrapping back to the bullet's x position — visually squashed and inconsistent with published trade typography. New layout: list block indented 14pt from the body margin, bullet hangs at the indent point with 6pt of breathing room before body text starts, and wrapped continuation lines align with the BODY TEXT (not the bullet). This is the 'hanging indent' pattern every major style authority specifies. Render path: a new list-item branch in pass 2 extracts the standardised bullet/number prefix, measures it dynamically, computes bulletX = textX + 14 and bodyX = bulletX + bulletWidth + 6, wraps body content at the narrower hanging-indent width (textW - 14 - bulletWidth - 6), and draws each line with the bullet only on the first line. Mirror logic in pass 1 calcBodyPages so TOC page counts stay accurate. EPUB matches: p.list-item gets padding-left:1.5em + text-indent:-1em for the hanging effect. Tight inter-item spacing (half SPEC.paraGap) from v0.13.20 preserved.",
         "0.13.28 - Running headers and page numbers switched from Inter (sans-serif) to Gelasio (the body face), with the header set in italic. Trade-book convention (Chicago Manual §1.62-1.64, Bringhurst, New Hart's Rules, KDP / IngramSpark, and the actual practice of Penguin / Random House / Knopf paperbacks): running heads and folios sit in the SAME serif family as the body, smaller and often in italic or small caps. Sans-serif headers exist as a deliberate 'modern nonfiction' choice (some Crown / O'Reilly titles) but are not the default — for trade typography they read as a clash, especially in a focused, instructional tinybook. Header now uses BODY_FONT italic at SPEC.headerSize (8pt); folio uses BODY_FONT regular at the same size. Color and position unchanged. EPUB doesn't have fixed running headers / folios (reflowable) so no EPUB change needed.",
         "0.13.27 - Margins, page number position, and body-to-folio gap brought into line with 5x8 trade-paperback industry standard (KDP / IngramSpark / Bringhurst). Audit findings: (1) Top margin was 24pt = 0.33\", below the 0.5-0.625\" recommended range — bumped to 36pt (0.5\"). (2) Bottom margin was 30pt = 0.42\", below the 0.5-0.75\" range — bumped to 42pt (0.58\"). (3) Visible gap from body's last line down to the page number was ~11pt — well under the 22-30pt (1.5-2 body lines) convention. Body's maxY moved from pageH-50 to pageH-65 in both passes (calcBodyPages dry-run and pass-2 render) and pageNumY moved from 546 to 552 (24pt above the page bottom edge). Net effect: visible gap from last body line to page number is now ~30pt — clear breathing room without wasted space. Horizontal margins (outer 42pt = 0.58\", inner gutter 66pt = 0.92\") were already within range and unchanged — they still mirror correctly verso↔recto with the larger 66pt margin always sitting on the spine side.",
@@ -2817,7 +2818,13 @@
         // render uses.
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
         const titleLineAdvance = Math.round(SPEC.chapterTitleSize * 1.4);
-        y += titleWrapped.length * titleLineAdvance + 35;
+        // Back-matter chapters (About the Author, Acknowledgments, etc.)
+        // use a tighter title-to-body gap \u2014 Chicago Manual \u00A71.78-1.81,
+        // Bringhurst, New Hart's all set end-matter sections more modestly
+        // than main chapters. ch.includeInToc === false is set
+        // automatically by isLikelyBackMatter() during chapter detection.
+        const postTitleGap = (ch.includeInToc === false) ? 20 : 35;
+        y += titleWrapped.length * titleLineAdvance + postTitleGap;
         // Epigraph \u2014 italic, set at body size (matches modern Penguin /
         // Knopf / HarperCollins house style; the italic + horizontal
         // indent provides visual subordination without making the
@@ -2833,7 +2840,14 @@
           y += epLines.length * epLineAdvance;
           if (ch.epigraphAttribution) y += 5 + atLineAdvance;
           y += 25;
-        } else { y += 25; }
+        } else if (ch.includeInToc !== false) {
+          // Empty-epigraph placeholder space \u2014 only for narrative
+          // chapters where the user might have an epigraph and the
+          // reserved gap maintains visual rhythm. Back-matter pages
+          // (no epigraph by convention) skip this so the body sits
+          // close to the title.
+          y += 25;
+        }
         return y;
       }
 
@@ -2996,7 +3010,14 @@
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
         const titleLineAdvance = Math.round(SPEC.chapterTitleSize * 1.4);
         for (const line of titleWrapped) { doc.text(line, getCenterX(), y, { align: "center" }); y += titleLineAdvance; }
-        y += 35;
+        // Back-matter chapters (About the Author, Acknowledgments, etc.)
+        // use a tighter title-to-body gap per trade-book convention
+        // (Chicago \u00A71.78-1.81, Bringhurst, New Hart's). ch.includeInToc
+        // is set to false automatically when the title matches the
+        // back-matter list. Must mirror calcOpeningHeight exactly so
+        // pass 1 and pass 2 agree on page positions.
+        const postTitleGap = (ch.includeInToc === false) ? 20 : 35;
+        y += postTitleGap;
 
         // Epigraph \u2014 italic, set at body size (matches modern Penguin /
         // Knopf / HarperCollins house style). Earlier versions set at
@@ -3022,7 +3043,11 @@
             y += atLineAdvance;
           }
           y += 25;
-        } else {
+        } else if (ch.includeInToc !== false) {
+          // Empty-epigraph placeholder \u2014 only for narrative chapters
+          // where the writer might add an epigraph later. Back-matter
+          // pages (About the Author, etc.) skip the placeholder so the
+          // body sits close to the title per convention.
           y += 25;
         }
 
