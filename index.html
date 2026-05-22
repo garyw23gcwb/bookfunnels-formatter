@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.38",
-      date: "2026-05-19",
+      version: "0.13.39",
+      date: "2026-05-22",
       changes: [
+        "0.13.39 - Final fix for orphaned subheadings. Root cause: the heading's smart-break reservation (v0.13.31) guarantees AT LEAST N body lines fit after the heading, but actual available space is often slightly more — e.g. heading lands with 4 lines of space below when only 3 were reserved. For a 6-line body paragraph that means linesOnCurrentPage=4, remaining=2, which triggers the body's own widow control to push the WHOLE paragraph to the next page — orphaning the heading. The heading's smart-break and the body's widow control were re-evaluating the same situation and reaching opposite conclusions. Fix: skip widow/orphan control on the body paragraph that IMMEDIATELY FOLLOWS a heading. The heading's reservation already validated the layout; re-checking is redundant and harmful. Implementation: new prevWasHeading flag, captured-and-cleared at the top of each paragraph iteration (headingPrecedes), set true by the H2/H3 branch, consumed by the body widow check (both run-based and justified paths). Same flag added to pass-1 calcBodyPages so TOC counts mirror the renderer. Separate notes: (1) Missing-image placeholder ('[missing image: img-XXX]') on the About the Author page is the existing browser autosave limitation — image bytes exceed localStorage quota so they get stripped on reload. Re-upload the image in Step 3. (2) Verified gutter alternation is correct — verso pages render left margin 42pt (outside) / right margin 66pt (gutter on spine side); recto pages render left 66pt (gutter on spine side) / right 42pt (outside). The 24pt difference is visually subtle but present; clearest visual confirmation is page-number alternation (verso left, recto right) which the code does correctly.",
         "0.13.38 - Epigraph wrap width matched to body / chapter-title width. Previously the epigraph wrapped at textW - 30 (15pt side-inset) per the traditional Chicago / Bringhurst convention. Modern trade-paperback house styles (Penguin Press, Crown, Knopf) set epigraphs at full body width and rely on italic + center alignment alone for visual subordination — no extra inset needed. For Gary's 5x8 tinybook format, body-width epigraphs read cleaner and share the same measure as the chapter title (which was already at body width — its visual narrowness on the page came from centering shorter lines, not from any extra padding). Both passes (calcOpeningHeight dry-run and pass-2 render) and EPUB CSS updated: p.epigraph margin 1.5em 1.5em → 1.5em 0, p.epigraph-attribution margin 0 1.5em 2em → 0 0 2em. NO change to chapter title — it was already correctly set at body width.",
         "0.13.37 - Chapter title reduced from 18pt to 17pt for a more mid-convention feel. The 1.6-1.8× body range that Chicago Manual, Bringhurst, Penguin RH, and Knopf all specify for 5x8 trade paperback chapter titles puts the 'comfortable middle' at 1.7×. 18pt (1.8×) sat at the upper edge — readable but felt visually heavy on multi-line wrapped titles. 17pt (1.7×) reads as distinctly a chapter title without dominating the page. Line advance auto-scales via the existing chapterTitleSize × 1.4 formula (now ~24pt instead of 25pt). Title-to-num-label gap stays clear via the bold weight on the title contrasting with the regular 14pt num label.",
         "0.13.36 - Chapter number label ('Chapter 1') reduced from 16pt to 14pt to align with trade-book convention. Chicago Manual, Bringhurst, Penguin / Random House, and Knopf all specify chapter-number labels at 1.2-1.4× body (12-14pt for a 10pt book), distinctly smaller than the title to create visual hierarchy. At 16pt the label was 1.6× body — same range as the chapter title — and the only thing distinguishing num from title was the bold weight. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8×, bold), chapter num 14pt (1.4×, regular), epigraph 10pt (1.0×, italic), body 10pt, attribution 9pt (0.9×, italic). All five values now sit comfortably within trade-book convention.",
@@ -2572,10 +2573,16 @@
         let y = startY;
         let pages = 1;
         let isFirstPara = true;
+        // Mirror the pass-2 prevWasHeading flag — the body paragraph
+        // that follows a heading skips widow/orphan, so the page count
+        // here must mirror that behaviour exactly or the TOC drifts.
+        let prevWasHeading = false;
 
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
           const cls = classifyParagraph(para);
+          const headingPrecedes = prevWasHeading;
+          prevWasHeading = false;
           // Mirror Pass 2: strip the alignment marker from body paragraphs
           // so line counting matches the rendered output exactly.
           if (cls.type === "body" && typeof cls.text === "string") {
@@ -2801,6 +2808,8 @@
             y += gapAbove;
             for (let _i = 0; _i < subLineCount; _i++) y += subLineHeight;
             y += gapBelow;
+            // Signal to the next body paragraph (pass 1 mirror of pass 2).
+            prevWasHeading = true;
             continue;
           }
 
@@ -2851,7 +2860,7 @@
           }
 
           // Apply same widow/orphan control as in rendering
-          if (WIDOW_ORPHAN.enabled && bodyLineCount > 0) {
+          if (WIDOW_ORPHAN.enabled && !headingPrecedes && bodyLineCount > 0) {
             let linesOnCurrentPage = 0;
             let tempY = y;
             for (let _i = 0; _i < bodyLineCount; _i++) {
@@ -3200,6 +3209,15 @@
         // page number baseline (pageNumY = pageH - 24).
         const maxY = SPEC.pageH - 65;
         let pagesUsed = 0;
+        // When a heading is rendered, its smart-break check already
+        // guaranteed enough space for the NEXT body paragraph (at least
+        // the reserved lines fit). The body paragraph's own widow/orphan
+        // control would otherwise re-evaluate the same situation and
+        // sometimes push the paragraph forward — orphaning the heading.
+        // We skip widow/orphan for the body paragraph immediately
+        // following a heading. Reset to false after any non-heading
+        // block (table, image, body, scene break).
+        let prevWasHeading = false;
 
         // Consistent baseline offset for all body text lines.
         // A line advances y by SPEC.lineHeight (15pt). The baseline of the glyph within that
@@ -3210,6 +3228,15 @@
         for (let pi = 0; pi < paragraphs.length; pi++) {
           let para = paragraphs[pi];
           const cls = classifyParagraph(para);
+          // Capture and immediately clear the "previous block was a
+          // heading" flag. Body branches use the local copy
+          // (headingPrecedes) to skip widow/orphan control so the body
+          // paragraph that follows a heading doesn't redundantly re-check
+          // layout the heading's smart-break already validated. Other
+          // branches ignore it. The heading branch sets prevWasHeading
+          // again at its end for the NEXT iteration.
+          const headingPrecedes = prevWasHeading;
+          prevWasHeading = false;
           // For body paragraphs, use the alignment-marker-stripped text so
           // the marker (e.g. ":center: ") never leaks into the rendered
           // output. classifyParagraph already returns cls.text with the
@@ -3513,6 +3540,9 @@
             }
             y += gapBelow;
             resetBodyFont();
+            // Signal to the next body paragraph that the heading's
+            // smart-break already validated enough space — skip widow.
+            prevWasHeading = true;
             continue;
           }
 
@@ -3634,7 +3664,9 @@
             const runLines = layoutRunsMixed(doc, runs, textW, SPEC.bodySize, BODY_FONT);
 
             // Widow/orphan control mirrors the plain-text path below.
-            if (WIDOW_ORPHAN.enabled && runLines.length > 0) {
+            // Skip when this paragraph follows a heading — the heading
+            // already ran its own smart-break check that reserves space.
+            if (WIDOW_ORPHAN.enabled && !headingPrecedes && runLines.length > 0) {
               let linesOnCurrentPage = 0;
               let tempY = y;
               for (let _i = 0; _i < runLines.length; _i++) {
@@ -3671,8 +3703,9 @@
           // and draw "-" at any hyphenated line endings.
           const lines = breakIntoJustifiedLines(doc, para, textW, SPEC.bodySize, BODY_FONT);
 
-          // Widow/orphan control
-          if (WIDOW_ORPHAN.enabled && lines.length > 0) {
+          // Widow/orphan control — skipped when this paragraph follows
+          // a heading (the heading's smart-break already validated layout).
+          if (WIDOW_ORPHAN.enabled && !headingPrecedes && lines.length > 0) {
             // Check how many lines can fit on current page
             let linesOnCurrentPage = 0;
             let tempY = y;
