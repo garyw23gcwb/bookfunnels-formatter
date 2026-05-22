@@ -94,7 +94,12 @@
         // Epigraph at bodySize - 1 (set per-call in the renderer, not
         // here) per Bringhurst / Chicago / New Hart's: italic, equal to
         // or slightly smaller than body — NEVER larger.
-        headerSize: 8, chapterNumSize: 16, chapterTitleSize: 18,
+        // Chapter "number" label ("Chapter 1") at 14pt = 1.4× body — at
+        // the upper bound of the 1.2-1.4× range Chicago, Bringhurst,
+        // Penguin RH, and Knopf all specify for chapter-number labels.
+        // The label sits visually subordinate to the 18pt chapter title,
+        // creating a clear two-level hierarchy on each chapter opener.
+        headerSize: 8, chapterNumSize: 14, chapterTitleSize: 18,
         epigraphSize: 18, dropCapLines: 3,
         // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
         // as a fraction of font size). Gelasio and most serifs sit around 0.72.
@@ -149,9 +154,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.35",
+      version: "0.13.36",
       date: "2026-05-19",
       changes: [
+        "0.13.36 - Chapter number label ('Chapter 1') reduced from 16pt to 14pt to align with trade-book convention. Chicago Manual, Bringhurst, Penguin / Random House, and Knopf all specify chapter-number labels at 1.2-1.4× body (12-14pt for a 10pt book), distinctly smaller than the title to create visual hierarchy. At 16pt the label was 1.6× body — same range as the chapter title — and the only thing distinguishing num from title was the bold weight. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8×, bold), chapter num 14pt (1.4×, regular), epigraph 10pt (1.0×, italic), body 10pt, attribution 9pt (0.9×, italic). All five values now sit comfortably within trade-book convention.",
         "0.13.35 - Front-matter TOC entries now render in italic. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style sheet, KDP / IngramSpark): front-matter section entries — Introduction, Who Should Read This Book?, Our/My Promise to You, and anything else appearing before the first numbered chapter — may be set in italic to subordinate them visually below numbered chapters without using prefixes. Whole row rendered italic: title, dot leaders, and the Roman folio. Numbered chapters stay in regular weight. EPUB nav matches via new li.front-matter a CSS rule. Page-number column width measured in both styles so the dot-leader alignment stays consistent across italic and regular entries.",
         "0.13.34 - TOC inter-entry spacing tightened from 2× lineHeight (30pt for default preset) to 1.6× lineHeight (24pt), matching the 1.5-1.75× range Bringhurst, Penguin / Random House style sheet, and New Hart's Rules all specify. The previous 2× was on the loose end of convention and made wrapped multi-line entries (like 'Chapter 1: What It Really Takes to Build an / E-commerce Business') look isolated among single-line neighbours. Tighter rhythm also lets all 11 entries fit more compactly on the contents page. Per-entry inner-wrap line advance (for the 2-line entry's continuation line) is still tight at tocEntrySize × 1.35, so wrapped entries still read as a single unit. TOC entry FONT SIZE remains at SPEC.bodySize, matching the body text and the convention from Chicago §1.43.",
         "0.13.33 - Chapter prefixes in TOC + Roman/Arabic split between front matter and main matter, per Chicago Manual §1.5-1.6 / Penguin / Random House / KDP / IngramSpark convention. Numbered chapters (matched against the 'Chapter N' patterns in detectChapters) now render with a 'Chapter 1: ', 'Chapter 2: ' prefix in both the PDF TOC and the EPUB nav. Front matter sections — Introduction, Who Should Read This Book?, Our/My Promise to You, and any section appearing before the first numbered chapter — render by title only with no prefix. Page numbering also splits: front matter uses lowercase Roman folios (i, ii, iii…), main matter restarts at Arabic 1 on the first numbered chapter. Back matter (already flagged includeInToc:false) continues Arabic from where main matter ended. New helpers toRoman(n) and formatPageNum(n, style) at module scope. addPageNumber reads a closure-scoped currentPageStyle that's updated at the top of every chapter render. Pass 1 page-counting tracks displayPage + inMainMatter state and stores per-chapter style in chapterStyles[]; pass 2 consults the same array. Parity rule (chapters start on recto = odd display page) preserved within each phase. The transitional blank verso between Roman and Arabic — when the last Roman page lands on a recto — is handled at render time by the existing isRecto() check.",
