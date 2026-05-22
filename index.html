@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.27",
+      version: "0.13.28",
       date: "2026-05-19",
       changes: [
+        "0.13.28 - Running headers and page numbers switched from Inter (sans-serif) to Gelasio (the body face), with the header set in italic. Trade-book convention (Chicago Manual §1.62-1.64, Bringhurst, New Hart's Rules, KDP / IngramSpark, and the actual practice of Penguin / Random House / Knopf paperbacks): running heads and folios sit in the SAME serif family as the body, smaller and often in italic or small caps. Sans-serif headers exist as a deliberate 'modern nonfiction' choice (some Crown / O'Reilly titles) but are not the default — for trade typography they read as a clash, especially in a focused, instructional tinybook. Header now uses BODY_FONT italic at SPEC.headerSize (8pt); folio uses BODY_FONT regular at the same size. Color and position unchanged. EPUB doesn't have fixed running headers / folios (reflowable) so no EPUB change needed.",
         "0.13.27 - Margins, page number position, and body-to-folio gap brought into line with 5x8 trade-paperback industry standard (KDP / IngramSpark / Bringhurst). Audit findings: (1) Top margin was 24pt = 0.33\", below the 0.5-0.625\" recommended range — bumped to 36pt (0.5\"). (2) Bottom margin was 30pt = 0.42\", below the 0.5-0.75\" range — bumped to 42pt (0.58\"). (3) Visible gap from body's last line down to the page number was ~11pt — well under the 22-30pt (1.5-2 body lines) convention. Body's maxY moved from pageH-50 to pageH-65 in both passes (calcBodyPages dry-run and pass-2 render) and pageNumY moved from 546 to 552 (24pt above the page bottom edge). Net effect: visible gap from last body line to page number is now ~30pt — clear breathing room without wasted space. Horizontal margins (outer 42pt = 0.58\", inner gutter 66pt = 0.92\") were already within range and unchanged — they still mirror correctly verso↔recto with the larger 66pt margin always sitting on the spine side.",
         "0.13.26 - Epigraph type bumped from bodySize - 1 to bodySize (matches modern Penguin / Knopf / HarperCollins house style). The strict 19th-century Chicago / Bringhurst rule sets epigraphs 1-2pt smaller than body, but the visual subordination from italic + horizontal indent is enough on its own — body-size epigraphs read with real presence and don't look pinched against the surrounding 10pt body. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8x), epigraph 10pt (1.0x — same as body, italic + indented), body 10pt, attribution 9pt (0.9x — one point smaller than epigraph). Scales correctly for Spacious preset: epigraph 11pt, attribution 10pt. EPUB CSS lifted to match: p.epigraph 1em (was 0.9em), p.epigraph-attribution 0.9em (was 0.85em).",
         "0.13.25 - Subheadings no longer orphan at the foot of a page. Trade-book convention (Chicago Manual §1.66, Bringhurst, New Hart's Rules) requires at least 2 lines of body text beneath a subheading on the same page; Penguin Random House prefers 3. The previous H2/H3 smart break reserved 2 body lines below — but the body paragraph's own widow control (WIDOW_ORPHAN.minLinesAtPageEnd = 2) then triggered, pushing the entire body paragraph to the next page and orphaning the heading. Fix: bump the heading's reservation from 2 to 3 body lines so the widow control no longer fires. Smarter still — peek at the next paragraph's wrapped line count and reserve MIN(3, nextParagraphLines), so a heading followed by a naturally-short 1- or 2-line paragraph doesn't get pushed forward unnecessarily. Headings that are the final block of a chapter (no body to follow) require zero reservation. Applied to both pass-1 calcBodyPages (dry run, for accurate TOC) and pass-2 render so they stay in lockstep.",
@@ -2127,16 +2128,23 @@
         doc.setTextColor(30);
       }
 
+      // Running head + folio typography (Chicago Manual §1.62-1.64,
+      // Bringhurst, New Hart's Rules, real-world Penguin / Random House /
+      // Knopf): same family as the body, set smaller, header in italic,
+      // folio in regular weight. Sans-serif headers are a deliberate
+      // modern choice for tech / business titles but not the default for
+      // trade-book typography — earlier versions used Inter (sans), which
+      // clashed with the Gelasio body.
       function addRunningHeader(chapterTitle) {
         const m = getMargins();
-        doc.setFont(HEADER_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        doc.setFont(BODY_FONT, "italic"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
         if (isRecto()) { doc.text(chapterTitle, SPEC.pageW - m.outside, m.top + SPEC.headerSize, { align: "right" }); }
         else { doc.text(bookData.title, m.inside, m.top + SPEC.headerSize); }
       }
 
       function addPageNumber(num) {
         const m = getMargins();
-        doc.setFont(HEADER_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
+        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.headerSize); doc.setTextColor(80);
         if (isRecto()) { doc.text(String(num), SPEC.pageW - m.outside, SPEC.pageNumY, { align: "right" }); }
         else { doc.text(String(num), m.inside, SPEC.pageNumY); }
       }
