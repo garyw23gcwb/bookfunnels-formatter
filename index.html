@@ -94,12 +94,16 @@
         // Epigraph at bodySize - 1 (set per-call in the renderer, not
         // here) per Bringhurst / Chicago / New Hart's: italic, equal to
         // or slightly smaller than body — NEVER larger.
-        // Chapter "number" label ("Chapter 1") at 14pt = 1.4× body — at
-        // the upper bound of the 1.2-1.4× range Chicago, Bringhurst,
-        // Penguin RH, and Knopf all specify for chapter-number labels.
-        // The label sits visually subordinate to the 18pt chapter title,
-        // creating a clear two-level hierarchy on each chapter opener.
-        headerSize: 8, chapterNumSize: 14, chapterTitleSize: 18,
+        // Chapter title at 17pt = 1.7× body — middle of the 1.6-1.8×
+        // range Chicago, Bringhurst, Penguin RH, and Knopf all specify
+        // for 5x8 trade paperback chapter titles. 18pt (the previous
+        // value) sat at the upper edge of convention; 17pt reads as
+        // distinctly a chapter title without dominating the page.
+        // Chapter "number" label at 14pt = 1.4× body — upper bound of
+        // the 1.2-1.4× range for chapter labels. Title-to-label gap is
+        // 17pt - 14pt = 3pt + the bold weight on the title, which keeps
+        // the two-level hierarchy clear.
+        headerSize: 8, chapterNumSize: 14, chapterTitleSize: 17,
         epigraphSize: 18, dropCapLines: 3,
         // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
         // as a fraction of font size). Gelasio and most serifs sit around 0.72.
@@ -154,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.36",
+      version: "0.13.37",
       date: "2026-05-19",
       changes: [
+        "0.13.37 - Chapter title reduced from 18pt to 17pt for a more mid-convention feel. The 1.6-1.8× body range that Chicago Manual, Bringhurst, Penguin RH, and Knopf all specify for 5x8 trade paperback chapter titles puts the 'comfortable middle' at 1.7×. 18pt (1.8×) sat at the upper edge — readable but felt visually heavy on multi-line wrapped titles. 17pt (1.7×) reads as distinctly a chapter title without dominating the page. Line advance auto-scales via the existing chapterTitleSize × 1.4 formula (now ~24pt instead of 25pt). Title-to-num-label gap stays clear via the bold weight on the title contrasting with the regular 14pt num label.",
         "0.13.36 - Chapter number label ('Chapter 1') reduced from 16pt to 14pt to align with trade-book convention. Chicago Manual, Bringhurst, Penguin / Random House, and Knopf all specify chapter-number labels at 1.2-1.4× body (12-14pt for a 10pt book), distinctly smaller than the title to create visual hierarchy. At 16pt the label was 1.6× body — same range as the chapter title — and the only thing distinguishing num from title was the bold weight. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8×, bold), chapter num 14pt (1.4×, regular), epigraph 10pt (1.0×, italic), body 10pt, attribution 9pt (0.9×, italic). All five values now sit comfortably within trade-book convention.",
         "0.13.35 - Front-matter TOC entries now render in italic. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style sheet, KDP / IngramSpark): front-matter section entries — Introduction, Who Should Read This Book?, Our/My Promise to You, and anything else appearing before the first numbered chapter — may be set in italic to subordinate them visually below numbered chapters without using prefixes. Whole row rendered italic: title, dot leaders, and the Roman folio. Numbered chapters stay in regular weight. EPUB nav matches via new li.front-matter a CSS rule. Page-number column width measured in both styles so the dot-leader alignment stays consistent across italic and regular entries.",
         "0.13.34 - TOC inter-entry spacing tightened from 2× lineHeight (30pt for default preset) to 1.6× lineHeight (24pt), matching the 1.5-1.75× range Bringhurst, Penguin / Random House style sheet, and New Hart's Rules all specify. The previous 2× was on the loose end of convention and made wrapped multi-line entries (like 'Chapter 1: What It Really Takes to Build an / E-commerce Business') look isolated among single-line neighbours. Tighter rhythm also lets all 11 entries fit more compactly on the contents page. Per-entry inner-wrap line advance (for the 2-line entry's continuation line) is still tight at tocEntrySize × 1.35, so wrapped entries still read as a single unit. TOC entry FONT SIZE remains at SPEC.bodySize, matching the body text and the convention from Chicago §1.43.",
