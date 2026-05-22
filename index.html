@@ -99,11 +99,21 @@
         // Cap-height ratio for serif fonts (distance from baseline to top of capital letter,
         // as a fraction of font size). Gelasio and most serifs sit around 0.72.
         capHeightRatio: 0.72,
+        // 5x8 trade paperback margins per KDP / IngramSpark / Bringhurst:
+        //   top 0.5" / bottom 0.58" / outer 0.58" / inner gutter 0.92"
+        // The larger 66pt margin always sits on the spine side — for
+        // verso (left page) that's the RIGHT edge, for recto (right
+        // page) that's the LEFT edge. getTextX() returns the .inside
+        // value as the LEFT edge of the text block, so the mirroring is
+        // baked into the verso/recto values rather than in render code.
         margins: {
-          verso: { inside: 42, outside: 66, top: 24, bottom: 30 },
-          recto: { inside: 66, outside: 42, top: 24, bottom: 30 },
+          verso: { inside: 42, outside: 66, top: 36, bottom: 42 },
+          recto: { inside: 66, outside: 42, top: 36, bottom: 42 },
         },
-        pageNumY: 546,
+        // Page number baseline 24pt above the page bottom edge — sits
+        // inside the 42pt bottom margin with 24pt clearance from the
+        // page edge (safe well above any trim variance).
+        pageNumY: 552,
       };
     }
 
@@ -139,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.26",
+      version: "0.13.27",
       date: "2026-05-19",
       changes: [
+        "0.13.27 - Margins, page number position, and body-to-folio gap brought into line with 5x8 trade-paperback industry standard (KDP / IngramSpark / Bringhurst). Audit findings: (1) Top margin was 24pt = 0.33\", below the 0.5-0.625\" recommended range — bumped to 36pt (0.5\"). (2) Bottom margin was 30pt = 0.42\", below the 0.5-0.75\" range — bumped to 42pt (0.58\"). (3) Visible gap from body's last line down to the page number was ~11pt — well under the 22-30pt (1.5-2 body lines) convention. Body's maxY moved from pageH-50 to pageH-65 in both passes (calcBodyPages dry-run and pass-2 render) and pageNumY moved from 546 to 552 (24pt above the page bottom edge). Net effect: visible gap from last body line to page number is now ~30pt — clear breathing room without wasted space. Horizontal margins (outer 42pt = 0.58\", inner gutter 66pt = 0.92\") were already within range and unchanged — they still mirror correctly verso↔recto with the larger 66pt margin always sitting on the spine side.",
         "0.13.26 - Epigraph type bumped from bodySize - 1 to bodySize (matches modern Penguin / Knopf / HarperCollins house style). The strict 19th-century Chicago / Bringhurst rule sets epigraphs 1-2pt smaller than body, but the visual subordination from italic + horizontal indent is enough on its own — body-size epigraphs read with real presence and don't look pinched against the surrounding 10pt body. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8x), epigraph 10pt (1.0x — same as body, italic + indented), body 10pt, attribution 9pt (0.9x — one point smaller than epigraph). Scales correctly for Spacious preset: epigraph 11pt, attribution 10pt. EPUB CSS lifted to match: p.epigraph 1em (was 0.9em), p.epigraph-attribution 0.9em (was 0.85em).",
         "0.13.25 - Subheadings no longer orphan at the foot of a page. Trade-book convention (Chicago Manual §1.66, Bringhurst, New Hart's Rules) requires at least 2 lines of body text beneath a subheading on the same page; Penguin Random House prefers 3. The previous H2/H3 smart break reserved 2 body lines below — but the body paragraph's own widow control (WIDOW_ORPHAN.minLinesAtPageEnd = 2) then triggered, pushing the entire body paragraph to the next page and orphaning the heading. Fix: bump the heading's reservation from 2 to 3 body lines so the widow control no longer fires. Smarter still — peek at the next paragraph's wrapped line count and reserve MIN(3, nextParagraphLines), so a heading followed by a naturally-short 1- or 2-line paragraph doesn't get pushed forward unnecessarily. Headings that are the final block of a chapter (no body to follow) require zero reservation. Applied to both pass-1 calcBodyPages (dry run, for accurate TOC) and pass-2 render so they stay in lockstep.",
         "0.13.24 - Runtime fallback that recovers bullet lists in chapter bodies that arrived bullet-less. v0.13.23 fixed the paste handler so future <ul><li> pastes preserve their bullets — but chapters already pasted before v0.13.23 still have their list items sitting as bullet-less plain paragraphs, and users were reporting 'some bullets still not rendering' after the fix. New helpers looksLikeImplicitBullet() and promoteImplicitBulletRuns() walk the paragraph array returned by splitChapterBody; whenever 3+ consecutive paragraphs match the profile of a list item (1-80 chars, starts with capital, no terminal .!?:;, at least 3 words, not already a list / heading / table / scene break / alignment-prefixed), prepend '• ' to each so the downstream classifier picks them up. 3+ is the floor — two short lines in a row could be ordinary prose, three is the convention threshold for 'list' in trade typography. Word-count gate excludes one-word dialogue ('Yes' / 'No' / 'Maybe'); capital-letter gate excludes mid-sentence continuation. Existing chapter content gets fixed at render time without re-pasting.",
@@ -2494,7 +2505,11 @@
       // Helper: calculate how many pages a chapter's body text will take
       function calcBodyPages(ch, startY) {
         const textW = SPEC.pageW - SPEC.margins.recto.inside - SPEC.margins.recto.outside; // use recto for calc
-        const maxY = SPEC.pageH - 50;
+        // 65pt bottom buffer = ~30pt visible gap from last body line down
+        // to the page number baseline (pageNumY = pageH - 24). Convention
+        // for 5x8 trade paperback: 1.5-2 body lines of clearance between
+        // body text and folio.
+        const maxY = SPEC.pageH - 65;
         // splitChapterBody promotes embedded scene-break lines to their
         // own paragraphs (handles pastes where "* * *" sits between prose
         // with only single newlines around it).
@@ -2976,7 +2991,10 @@
         // pass 1 — scene-break lines are promoted to their own paragraphs.
         const paragraphs = splitChapterBody(ch.body);
         let isFirstPara = true;
-        const maxY = SPEC.pageH - 50;
+        // Must mirror pass-1 calcBodyPages exactly. 65pt bottom buffer
+        // gives ~30pt visible breathing room between last body line and
+        // page number baseline (pageNumY = pageH - 24).
+        const maxY = SPEC.pageH - 65;
         let pagesUsed = 0;
 
         // Consistent baseline offset for all body text lines.
