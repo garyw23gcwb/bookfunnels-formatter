@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.37",
+      version: "0.13.38",
       date: "2026-05-19",
       changes: [
+        "0.13.38 - Epigraph wrap width matched to body / chapter-title width. Previously the epigraph wrapped at textW - 30 (15pt side-inset) per the traditional Chicago / Bringhurst convention. Modern trade-paperback house styles (Penguin Press, Crown, Knopf) set epigraphs at full body width and rely on italic + center alignment alone for visual subordination — no extra inset needed. For Gary's 5x8 tinybook format, body-width epigraphs read cleaner and share the same measure as the chapter title (which was already at body width — its visual narrowness on the page came from centering shorter lines, not from any extra padding). Both passes (calcOpeningHeight dry-run and pass-2 render) and EPUB CSS updated: p.epigraph margin 1.5em 1.5em → 1.5em 0, p.epigraph-attribution margin 0 1.5em 2em → 0 0 2em. NO change to chapter title — it was already correctly set at body width.",
         "0.13.37 - Chapter title reduced from 18pt to 17pt for a more mid-convention feel. The 1.6-1.8× body range that Chicago Manual, Bringhurst, Penguin RH, and Knopf all specify for 5x8 trade paperback chapter titles puts the 'comfortable middle' at 1.7×. 18pt (1.8×) sat at the upper edge — readable but felt visually heavy on multi-line wrapped titles. 17pt (1.7×) reads as distinctly a chapter title without dominating the page. Line advance auto-scales via the existing chapterTitleSize × 1.4 formula (now ~24pt instead of 25pt). Title-to-num-label gap stays clear via the bold weight on the title contrasting with the regular 14pt num label.",
         "0.13.36 - Chapter number label ('Chapter 1') reduced from 16pt to 14pt to align with trade-book convention. Chicago Manual, Bringhurst, Penguin / Random House, and Knopf all specify chapter-number labels at 1.2-1.4× body (12-14pt for a 10pt book), distinctly smaller than the title to create visual hierarchy. At 16pt the label was 1.6× body — same range as the chapter title — and the only thing distinguishing num from title was the bold weight. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8×, bold), chapter num 14pt (1.4×, regular), epigraph 10pt (1.0×, italic), body 10pt, attribution 9pt (0.9×, italic). All five values now sit comfortably within trade-book convention.",
         "0.13.35 - Front-matter TOC entries now render in italic. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style sheet, KDP / IngramSpark): front-matter section entries — Introduction, Who Should Read This Book?, Our/My Promise to You, and anything else appearing before the first numbered chapter — may be set in italic to subordinate them visually below numbered chapters without using prefixes. Whole row rendered italic: title, dot leaders, and the Roman folio. Numbered chapters stay in regular weight. EPUB nav matches via new li.front-matter a CSS rule. Page-number column width measured in both styles so the dot-leader alignment stays consistent across italic and regular entries.",
@@ -2897,18 +2898,21 @@
         // automatically by isLikelyBackMatter() during chapter detection.
         const postTitleGap = (ch.includeInToc === false) ? 20 : 35;
         y += titleWrapped.length * titleLineAdvance + postTitleGap;
-        // Epigraph \u2014 italic, set at body size (matches modern Penguin /
-        // Knopf / HarperCollins house style; the italic + horizontal
-        // indent provides visual subordination without making the
-        // epigraph harder to read). Attribution one point smaller.
-        // Wrap width is textW - 30 (15pt inset each side).
+        // Epigraph \u2014 italic at body size, centered at the FULL body
+        // width. Modern trade-paperback style (Penguin Press, Crown,
+        // Knopf) sets epigraphs at body width and relies on italic +
+        // center alignment alone for visual subordination, rather than
+        // the traditional 1-2 em side-inset (which is still accepted
+        // per Chicago / Bringhurst but feels old-fashioned in 5x8
+        // tinybook format). Matches the chapter title's body-width
+        // wrap so all centered display elements share the same measure.
         if (ch.epigraph) {
           const epSize = SPEC.bodySize;
           const epLineAdvance = Math.round(epSize * 1.35);
           const atSize = SPEC.bodySize - 1;
           const atLineAdvance = Math.round(atSize * 1.35);
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
-          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW - 30);
+          const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW);
           y += epLines.length * epLineAdvance;
           if (ch.epigraphAttribution) y += 5 + atLineAdvance;
           y += 25;
@@ -3156,14 +3160,13 @@
         const postTitleGap = (ch.includeInToc === false) ? 20 : 35;
         y += postTitleGap;
 
-        // Epigraph \u2014 italic, set at body size (matches modern Penguin /
-        // Knopf / HarperCollins house style). Earlier versions set at
-        // bodySize - 1 per the strict Chicago / Bringhurst rule, but the
-        // visual subordination from italic + indent is enough on its own;
-        // body-size epigraphs read with more presence and don't look
-        // pinched against the surrounding 10pt body. Attribution one
-        // point smaller still. Quote marks kept; some house styles drop
-        // them but italics alone aren't always enough signal.
+        // Epigraph \u2014 italic at body size, centered at the FULL body
+        // width. Mirrors the chapter title's wrap measure so all
+        // centered display elements (chapter title, epigraph,
+        // attribution) share the same column. The italic + center
+        // alignment alone provides visual subordination per modern
+        // Penguin Press / Crown / Knopf practice; the traditional 1-2
+        // em side-inset is still accepted but looks dated at 5x8 trim.
         if (ch.epigraph) {
           const epSize = SPEC.bodySize;
           const epLineAdvance = Math.round(epSize * 1.35);
@@ -3171,7 +3174,7 @@
           const atLineAdvance = Math.round(atSize * 1.35);
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
           const epText = "\u201C" + ch.epigraph + "\u201D";
-          const epLines = wrapText(epText, textW - 30, epSize, "italic");
+          const epLines = wrapText(epText, textW, epSize, "italic");
           for (const line of epLines) { doc.text(line, getCenterX(), y, { align: "center" }); y += epLineAdvance; }
           if (ch.epigraphAttribution) {
             y += 5;
@@ -3783,10 +3786,12 @@
         // House style). Tight bottom margin keeps consecutive items as a
         // visual unit.
         'p.list-item { margin: 0 0 0.25em; padding-left: 1.5em; text-indent: -1em; }',
-        // Epigraph — italic at body size (matches modern Penguin / Knopf /
-        // HarperCollins house style). Italic + horizontal indent gives
-        // visual subordination without making the epigraph hard to read.
-        'p.epigraph { font-style: italic; font-size: 1em; margin: 1.5em 1.5em; text-align: center; }',
+        // Epigraph — italic at body size, centered at full body width.
+        // Italic + center alignment alone provides visual subordination
+        // per modern Penguin Press / Crown / Knopf practice. No
+        // horizontal side margin so the epigraph shares the same measure
+        // as the body text and the chapter title.
+        'p.epigraph { font-style: italic; font-size: 1em; margin: 1.5em 0; text-align: center; }',
         // Centered block image (body image markers ![alt](img-id))
         'p.figure { text-align: center; margin: 1.5em 0; }',
         'p.figure img { max-width: 100%; height: auto; }',
@@ -3803,7 +3808,7 @@
         // wide breathing room above and below to read clearly as a transition.
         'p.scene-break { text-align: center; margin: 1.8em 0; letter-spacing: 0.5em; }',
         // Attribution one point smaller than the epigraph per convention.
-        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 1.5em 2em; font-size: 0.9em; }',
+        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 0 2em; font-size: 0.9em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
         // When there is no chapter-num (named section), h1 is the page opener. A dedicated
