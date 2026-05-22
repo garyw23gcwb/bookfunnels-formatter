@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.30",
+      version: "0.13.31",
       date: "2026-05-19",
       changes: [
+        "0.13.31 - Subheading orphan prevention made robust. v0.13.25 reserved MIN(3, nextBodyLines) — but that didn't account for the body's own widow/orphan control (minLinesAtPageStart / minLinesAtPageEnd = 2). For a 4- or 5-line body paragraph following a heading, reserving only 3 lines left 1-2 lines remaining, which triggered the widow check and pushed the whole paragraph to the next page — orphaning the heading. The default 3-line reservation was also wrong when the next block was another heading, a table, an image, or a scene break (each of which needs more vertical space than 3 body lines). New reservation rules: (a) body next, N ≤ 5: reserve N lines (fit all, no widow trigger); (b) body next, N ≥ 6: reserve 3 (remaining ≥ 3 is above widow threshold); (c) heading next: reserve heading height + 3 body lines for ITS reservation; (d) scene break next: 3 line-heights; (e) table next: 5 line-heights (header + 2 rows); (f) image next: 6 line-heights. List items in the next-paragraph check are wrapped at the narrower hanging-indent width (textW - 25) so line count matches the actual list-item renderer output. Applied to both pass-1 calcBodyPages and pass-2 render so TOC stays accurate. All five subheading orphan cases the user could spot in trade output are now blocked.",
         "0.13.30 - Back-matter chapters (About the Author, Acknowledgments, etc.) no longer reserve a 25pt epigraph placeholder gap below their title. Trade-book convention (Chicago Manual §1.78-1.81, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark) sets end-matter sections more modestly than main chapters — no epigraph zone, smaller title-to-body gap. Previously every chapter, including back matter, allocated 35pt post-title + 25pt empty-epigraph placeholder = 60pt of dead space between the chapter title and the body content. On an About the Author page with an embedded photo, that gap made the photo float ~75pt below the title with no visual reason. Detection reuses the existing isLikelyBackMatter() / ch.includeInToc === false flag set at chapter-detection time (matches About the Author, About the Authors, Acknowledgments, Bibliography, Index, Colophon, Appendix, etc.). For back-matter chapters: post-title gap is 20pt instead of 35pt, and the empty-epigraph placeholder (25pt) is skipped entirely. Net reduction: ~40pt of dead space removed. Back matter that genuinely has an epigraph still renders it normally; only the no-epigraph placeholder is dropped. Mirrors in pass-1 calcOpeningHeight so the TOC stays accurate. Same flag already gates drop-cap skipping (v0.12.8); now it also gates epigraph-placeholder skipping — consistent treatment of back-matter pages.",
         "0.13.29 - Bulleted and numbered lists now use proper hanging indentation per trade-book convention (Chicago Manual §6.130-6.135, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark). Previously bullets sat flush at the body margin with continuation lines wrapping back to the bullet's x position — visually squashed and inconsistent with published trade typography. New layout: list block indented 14pt from the body margin, bullet hangs at the indent point with 6pt of breathing room before body text starts, and wrapped continuation lines align with the BODY TEXT (not the bullet). This is the 'hanging indent' pattern every major style authority specifies. Render path: a new list-item branch in pass 2 extracts the standardised bullet/number prefix, measures it dynamically, computes bulletX = textX + 14 and bodyX = bulletX + bulletWidth + 6, wraps body content at the narrower hanging-indent width (textW - 14 - bulletWidth - 6), and draws each line with the bullet only on the first line. Mirror logic in pass 1 calcBodyPages so TOC page counts stay accurate. EPUB matches: p.list-item gets padding-left:1.5em + text-indent:-1em for the hanging effect. Tight inter-item spacing (half SPEC.paraGap) from v0.13.20 preserved.",
         "0.13.28 - Running headers and page numbers switched from Inter (sans-serif) to Gelasio (the body face), with the header set in italic. Trade-book convention (Chicago Manual §1.62-1.64, Bringhurst, New Hart's Rules, KDP / IngramSpark, and the actual practice of Penguin / Random House / Knopf paperbacks): running heads and folios sit in the SAME serif family as the body, smaller and often in italic or small caps. Sans-serif headers exist as a deliberate 'modern nonfiction' choice (some Crown / O'Reilly titles) but are not the default — for trade typography they read as a clash, especially in a focused, instructional tinybook. Header now uses BODY_FONT italic at SPEC.headerSize (8pt); folio uses BODY_FONT regular at the same size. Color and position unchanged. EPUB doesn't have fixed running headers / folios (reflowable) so no EPUB change needed.",
@@ -2704,23 +2705,51 @@
               subLineCount = doc.splitTextToSize(cls.text, textW).length;
             }
 
-            // Peek at the next paragraph to determine how many body lines
-            // we need beneath this heading. Floor of 3 (clears widow
-            // control), capped at the next paragraph's actual line count.
-            let bodyLinesNeeded = 3;
+            // Peek at the next paragraph to size the body reservation.
+            // Must account for the body's own widow/orphan control which
+            // PUSHES THE PARAGRAPH FORWARD when remainingLines is 1-2 OR
+            // linesOnCurrentPage is 1-2 (WIDOW_ORPHAN.minLinesAtPageStart
+            // / minLinesAtPageEnd = 2). v0.13.25 only handled N ≤ 3; a
+            // 4- or 5-line paragraph reserved with 3 lines would leave 1
+            // or 2 remaining, triggering widow control and orphaning the
+            // heading.
+            //
+            // Reservation rules:
+            //   body with N ≤ 5  → reserve N (fit all; no widow trigger)
+            //   body with N ≥ 6  → reserve 3 (remaining N-3 ≥ 3, safe)
+            //   heading next     → heading own height + 3 body lines
+            //   scene break next → 3 line-heights (the ornament block)
+            //   table next       → 5 line-heights (header + 2 rows min)
+            //   image next       → 6 line-heights (moderate image)
+            //   chapter end      → 0
+            let reservation = 0;
             if (pi + 1 < paragraphs.length) {
               const nextCls = classifyParagraph(paragraphs[pi + 1]);
               if (nextCls.type === "body" && nextCls.text) {
                 doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
-                const nextWrapped = doc.splitTextToSize(nextCls.text, textW);
-                bodyLinesNeeded = Math.min(3, nextWrapped.length);
+                // List items wrap at narrower hanging-indent width; the
+                // line count must match what the renderer will produce.
+                const nextWrapW = nextCls.isListItem ? (textW - 25) : textW;
+                const nextWrapped = doc.splitTextToSize(nextCls.text, nextWrapW);
+                const N = nextWrapped.length;
+                const linesNeeded = (N <= 5) ? N : 3;
+                reservation = linesNeeded * SPEC.lineHeight;
                 doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+              } else if (nextCls.type === "h2" || nextCls.type === "h3") {
+                const nSize = nextCls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
+                const nLineH = nSize * 1.35;
+                const nGapAbove = nextCls.type === "h2" ? SPEC.lineHeight * 0.65 : SPEC.lineHeight * 0.5;
+                const nGapBelow = nextCls.type === "h2" ? SPEC.lineHeight * 0.55 : SPEC.lineHeight * 0.4;
+                reservation = nGapAbove + nLineH + nGapBelow + (SPEC.lineHeight * 3);
+              } else if (nextCls.type === "scenebreak") {
+                reservation = SPEC.lineHeight * 3;
+              } else if (nextCls.type === "table") {
+                reservation = SPEC.lineHeight * 5;
+              } else if (nextCls.type === "image") {
+                reservation = SPEC.lineHeight * 6;
               }
-              // Headings, tables, images, scene breaks: keep default 3
-            } else {
-              bodyLinesNeeded = 0; // heading is the last block; no body below
             }
-            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * bodyLinesNeeded);
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + reservation;
 
             if (y + needed > maxY) {
               pages++; y = bodyTopY();
@@ -3298,22 +3327,46 @@
             }
             const subLineCount = (runSubLines || plainSubLines).length;
 
-            // Peek at the next paragraph to size the body-line reservation.
-            // MUST mirror the same calculation in calcBodyPages so the dry
-            // run and the actual render agree on page boundaries.
-            let bodyLinesNeeded = 3;
+            // Peek at the next paragraph to size the body reservation.
+            // MUST mirror calcBodyPages exactly so dry-run and render
+            // agree on page boundaries.
+            //
+            // Reservation accounts for the body's own widow/orphan
+            // control (minLinesAtPageStart / minLinesAtPageEnd = 2).
+            // Reserving only 3 lines for an N=4 or N=5 body paragraph
+            // would leave 1-2 lines remaining → widow trigger →
+            // paragraph pushed forward → heading orphaned. Fix below.
+            let reservation = 0;
             if (pi + 1 < paragraphs.length) {
               const nextCls = classifyParagraph(paragraphs[pi + 1]);
               if (nextCls.type === "body" && nextCls.text) {
                 doc.setFont(BODY_FONT, "normal"); doc.setFontSize(SPEC.bodySize);
-                const nextWrapped = doc.splitTextToSize(nextCls.text, textW);
-                bodyLinesNeeded = Math.min(3, nextWrapped.length);
+                const nextWrapW = nextCls.isListItem ? (textW - 25) : textW;
+                const nextWrapped = doc.splitTextToSize(nextCls.text, nextWrapW);
+                const N = nextWrapped.length;
+                // N ≤ 5: fit ALL lines (otherwise widow trigger fires).
+                // N ≥ 6: 3 suffices (remaining ≥ 3, safe from widow).
+                const linesNeeded = (N <= 5) ? N : 3;
+                reservation = linesNeeded * SPEC.lineHeight;
                 doc.setFont(BODY_FONT, "bold"); doc.setFontSize(subSize);
+              } else if (nextCls.type === "h2" || nextCls.type === "h3") {
+                // Next is another heading — reserve its height + its own
+                // 3-line body reservation, otherwise it pushes forward
+                // and orphans THIS heading.
+                const nSize = nextCls.type === "h2" ? SPEC.bodySize + 3 : SPEC.bodySize + 1;
+                const nLineH = nSize * 1.35;
+                const nGapAbove = nextCls.type === "h2" ? SPEC.lineHeight * 0.65 : SPEC.lineHeight * 0.5;
+                const nGapBelow = nextCls.type === "h2" ? SPEC.lineHeight * 0.55 : SPEC.lineHeight * 0.4;
+                reservation = nGapAbove + nLineH + nGapBelow + (SPEC.lineHeight * 3);
+              } else if (nextCls.type === "scenebreak") {
+                reservation = SPEC.lineHeight * 3;
+              } else if (nextCls.type === "table") {
+                reservation = SPEC.lineHeight * 5;
+              } else if (nextCls.type === "image") {
+                reservation = SPEC.lineHeight * 6;
               }
-            } else {
-              bodyLinesNeeded = 0;
             }
-            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + (SPEC.lineHeight * bodyLinesNeeded);
+            const needed = gapAbove + subLineCount * subLineHeight + gapBelow + reservation;
 
             if (y + needed > maxY) {
               newPage(); pagesUsed++; addRunningHeader(ch.title || ch.num || "");
