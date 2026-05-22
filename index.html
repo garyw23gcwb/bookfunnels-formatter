@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.34",
+      version: "0.13.35",
       date: "2026-05-19",
       changes: [
+        "0.13.35 - Front-matter TOC entries now render in italic. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style sheet, KDP / IngramSpark): front-matter section entries — Introduction, Who Should Read This Book?, Our/My Promise to You, and anything else appearing before the first numbered chapter — may be set in italic to subordinate them visually below numbered chapters without using prefixes. Whole row rendered italic: title, dot leaders, and the Roman folio. Numbered chapters stay in regular weight. EPUB nav matches via new li.front-matter a CSS rule. Page-number column width measured in both styles so the dot-leader alignment stays consistent across italic and regular entries.",
         "0.13.34 - TOC inter-entry spacing tightened from 2× lineHeight (30pt for default preset) to 1.6× lineHeight (24pt), matching the 1.5-1.75× range Bringhurst, Penguin / Random House style sheet, and New Hart's Rules all specify. The previous 2× was on the loose end of convention and made wrapped multi-line entries (like 'Chapter 1: What It Really Takes to Build an / E-commerce Business') look isolated among single-line neighbours. Tighter rhythm also lets all 11 entries fit more compactly on the contents page. Per-entry inner-wrap line advance (for the 2-line entry's continuation line) is still tight at tocEntrySize × 1.35, so wrapped entries still read as a single unit. TOC entry FONT SIZE remains at SPEC.bodySize, matching the body text and the convention from Chicago §1.43.",
         "0.13.33 - Chapter prefixes in TOC + Roman/Arabic split between front matter and main matter, per Chicago Manual §1.5-1.6 / Penguin / Random House / KDP / IngramSpark convention. Numbered chapters (matched against the 'Chapter N' patterns in detectChapters) now render with a 'Chapter 1: ', 'Chapter 2: ' prefix in both the PDF TOC and the EPUB nav. Front matter sections — Introduction, Who Should Read This Book?, Our/My Promise to You, and any section appearing before the first numbered chapter — render by title only with no prefix. Page numbering also splits: front matter uses lowercase Roman folios (i, ii, iii…), main matter restarts at Arabic 1 on the first numbered chapter. Back matter (already flagged includeInToc:false) continues Arabic from where main matter ended. New helpers toRoman(n) and formatPageNum(n, style) at module scope. addPageNumber reads a closure-scoped currentPageStyle that's updated at the top of every chapter render. Pass 1 page-counting tracks displayPage + inMainMatter state and stores per-chapter style in chapterStyles[]; pass 2 consults the same array. Parity rule (chapters start on recto = odd display page) preserved within each phase. The transitional blank verso between Roman and Arabic — when the last Roman page lands on a recto — is handled at render time by the existing isRecto() check.",
         "0.13.32 - TOC wrapped-title continuation lines now hang-indented (~1em). When a long chapter title wraps to a second line in the table of contents, trade-book convention (Chicago Manual §1.43, Bringhurst, New Hart's Rules, Penguin / Random House style) requires the SECOND and subsequent lines to be indented from the title's start so they visually attach to the first line as part of the same entry. Previously v0.13.19's wrap produced continuation lines flush at tocTextX, which made 'Business' on line 2 of 'What It Really Takes to Build an E-commerce / Business ........ 19' look like it could be a separate entry. Fix: line 0 stays at tocTextX (title start); lines 1+ render at tocTextX + tocWrapIndent (1.2 × tocEntrySize ≈ 12pt for 10pt body). Dot leaders and page number still right-align to the page-number column on the last line. Single-line entries are unaffected.",
@@ -2982,14 +2983,19 @@
       // Skip chapters flagged as excluded from the TOC (back matter like
       // "About the Author", "Acknowledgments", etc.) — their pages still
       // exist in the book but their rows do not appear in the TOC.
-      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize);
+      // Measure the widest page number in BOTH italic (front matter) and
+      // normal (main matter) so the dot-leader column aligns regardless
+      // of which entries we're looking at on a given row.
       let maxPageNumWidth = 0;
       for (let i = 0; i < chapters.length; i++) {
         if (chapters[i].includeInToc === false) continue;
+        const style = chapterStyles[i] === "roman" ? "italic" : "normal";
+        doc.setFont(BODY_FONT, style); doc.setFontSize(tocEntrySize);
         const pn = formatPageNum(chapterPageNumbers[i], chapterStyles[i]);
         const w = doc.getTextWidth(pn);
         if (w > maxPageNumWidth) maxPageNumWidth = w;
       }
+      doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize);
 
       // Consistent dot spacing: measure one dot glyph width + a fixed gap, used for every row.
       const dotGlyphWidth = doc.getTextWidth(".");
@@ -3014,8 +3020,14 @@
           ? (ch.num + ": " + baseTitle)
           : baseTitle;
         const pageNumStr = formatPageNum(chapterPageNumbers[i], chapterStyles[i]);
+        // Front-matter entries (Roman folios) render in italic per the
+        // recognised trade convention (Chicago §1.42-1.43, Bringhurst,
+        // New Hart's, Penguin / Random House): italic title + italic
+        // folio visually subordinates section pages below numbered
+        // chapters, signalling 'section, not chapter' without prefixes.
+        const entryStyle = chapterStyles[i] === "roman" ? "italic" : "normal";
 
-        doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
+        doc.setFont(BODY_FONT, entryStyle); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
 
         // Reserve: [title] [gap] [dots...] [gap] [page num, right aligned]
         const gap = 6;
@@ -3039,7 +3051,9 @@
         const entryHeight = lastLineIdx * tocWrappedLineAdvance + tocRowAdvance;
         if (ty + entryHeight > SPEC.pageH - 80) {
           newPage(); ty = 60;
-          doc.setFont(BODY_FONT, "normal"); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
+          // After a TOC page break, re-establish the per-entry font
+          // style (italic for front matter, normal for main matter).
+          doc.setFont(BODY_FONT, entryStyle); doc.setFontSize(tocEntrySize); doc.setTextColor(30);
         }
 
         // Draw any continuation lines (everything except the last) first \u2014
@@ -3785,6 +3799,10 @@
         // class handles this case so we do not put page-break-before on every h1.
         'h1.chapter-opener { page-break-before: always; break-before: page; }',
         'p.dedication { font-style: italic; text-align: center; margin: 1em 2em; }',
+        // Front-matter entries in the nav TOC render in italic to match
+        // the PDF TOC convention (Chicago §1.42-1.43, Bringhurst, New
+        // Hart's, Penguin / Random House style sheet).
+        'nav#toc ol li.front-matter a { font-style: italic; }',
         // Single-line copyright items (publisher, copyright statement,
         // ISBN) stay centered. The long "All rights reserved" paragraph
         // gets its own class so it can be set left-aligned + justified,
@@ -3901,8 +3919,14 @@
       // Keyed by image id so the same image referenced from multiple
       // chapters is only packaged once.
       const imagesToPackage = {};
+      // Track front-matter / main-matter split — same logic as the PDF
+      // pass (numbered chapters and beyond are main matter). Used to
+      // mark front-matter nav entries as italic, matching the PDF TOC.
+      let epubInMainMatter = false;
       for (let ci = 0; ci < chapters.length; ci++) {
         const ch = chapters[ci];
+        if (ch.num) epubInMainMatter = true;
+        const chIsFrontMatter = !epubInMainMatter;
         let body = '';
         // Page break: forced on whichever element opens the chapter.
         // - If ch.num is present, chapter-num.p gets the break, h1 follows on same page.
@@ -4026,7 +4050,12 @@
         const navTitle = ch.num && ch.title
           ? (ch.num + ": " + ch.title)
           : (ch.title || ch.num || ("Chapter " + (ci + 1)));
-        chapterFiles.push({ file: fname, title: navTitle, includeInToc: ch.includeInToc !== false });
+        chapterFiles.push({
+          file: fname,
+          title: navTitle,
+          includeInToc: ch.includeInToc !== false,
+          isFrontMatter: chIsFrontMatter,
+        });
       }
 
       // Write image bytes and collect manifest entries for every referenced
@@ -4048,7 +4077,11 @@
       let navBody = '<nav epub:type="toc" id="toc">\n  <h1>Contents</h1>\n  <ol>\n';
       for (const cf of chapterFiles) {
         if (!cf.includeInToc) continue;
-        navBody += '    <li><a href="' + cf.file + '">' + esc(cf.title) + '</a></li>\n';
+        // Front-matter entries get a class that renders the link in
+        // italic, matching the PDF TOC convention (Chicago §1.42-1.43,
+        // Bringhurst, New Hart's, Penguin / Random House style).
+        const liClass = cf.isFrontMatter ? ' class="front-matter"' : '';
+        navBody += '    <li' + liClass + '><a href="' + cf.file + '">' + esc(cf.title) + '</a></li>\n';
       }
       navBody += '  </ol>\n</nav>';
       oebps.file("nav.xhtml", xhtmlDoc("Contents", navBody));
