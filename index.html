@@ -139,9 +139,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.25",
+      version: "0.13.26",
       date: "2026-05-19",
       changes: [
+        "0.13.26 - Epigraph type bumped from bodySize - 1 to bodySize (matches modern Penguin / Knopf / HarperCollins house style). The strict 19th-century Chicago / Bringhurst rule sets epigraphs 1-2pt smaller than body, but the visual subordination from italic + horizontal indent is enough on its own — body-size epigraphs read with real presence and don't look pinched against the surrounding 10pt body. New ratios for 5x8 trade paperback at 10pt body: chapter title 18pt (1.8x), epigraph 10pt (1.0x — same as body, italic + indented), body 10pt, attribution 9pt (0.9x — one point smaller than epigraph). Scales correctly for Spacious preset: epigraph 11pt, attribution 10pt. EPUB CSS lifted to match: p.epigraph 1em (was 0.9em), p.epigraph-attribution 0.9em (was 0.85em).",
         "0.13.25 - Subheadings no longer orphan at the foot of a page. Trade-book convention (Chicago Manual §1.66, Bringhurst, New Hart's Rules) requires at least 2 lines of body text beneath a subheading on the same page; Penguin Random House prefers 3. The previous H2/H3 smart break reserved 2 body lines below — but the body paragraph's own widow control (WIDOW_ORPHAN.minLinesAtPageEnd = 2) then triggered, pushing the entire body paragraph to the next page and orphaning the heading. Fix: bump the heading's reservation from 2 to 3 body lines so the widow control no longer fires. Smarter still — peek at the next paragraph's wrapped line count and reserve MIN(3, nextParagraphLines), so a heading followed by a naturally-short 1- or 2-line paragraph doesn't get pushed forward unnecessarily. Headings that are the final block of a chapter (no body to follow) require zero reservation. Applied to both pass-1 calcBodyPages (dry run, for accurate TOC) and pass-2 render so they stay in lockstep.",
         "0.13.24 - Runtime fallback that recovers bullet lists in chapter bodies that arrived bullet-less. v0.13.23 fixed the paste handler so future <ul><li> pastes preserve their bullets — but chapters already pasted before v0.13.23 still have their list items sitting as bullet-less plain paragraphs, and users were reporting 'some bullets still not rendering' after the fix. New helpers looksLikeImplicitBullet() and promoteImplicitBulletRuns() walk the paragraph array returned by splitChapterBody; whenever 3+ consecutive paragraphs match the profile of a list item (1-80 chars, starts with capital, no terminal .!?:;, at least 3 words, not already a list / heading / table / scene break / alignment-prefixed), prepend '• ' to each so the downstream classifier picks them up. 3+ is the floor — two short lines in a row could be ordinary prose, three is the convention threshold for 'list' in trade typography. Word-count gate excludes one-word dialogue ('Yes' / 'No' / 'Maybe'); capital-letter gate excludes mid-sentence continuation. Existing chapter content gets fixed at render time without re-pasting.",
         "0.13.23 - Paste-from-Word/Docs bullet lists no longer lose their bullets. htmlToMarkdownLite's <li> handler was emitting just the inner text with a single \\n between items — the bullet glyph was silently stripped, so a copied semantic <ul><li>A</li><li>B</li></ul> arrived in the editor as four bullet-less lines that the list detector then couldn't see. New handlers: <ul> walks its direct <li> children and emits each as '• content\\n\\n'; <ol> emits 'N. content\\n\\n' with N incrementing from the start attribute (default 1); orphaned <li> outside a list container defaults to bullet rather than dropping the marker. Each item ends with a paragraph break so splitChapterBody sees individual items and classifyParagraph + normalizeListMarker take over from there. To fix CURRENT projects whose lists already arrived bullet-less, re-paste the affected section from Word / Docs once v0.13.23 is loaded — the new handler will restore the bullets.",
@@ -2763,13 +2764,15 @@
         const titleWrapped = wrapTitle(ch.title, textW, SPEC.chapterTitleSize);
         const titleLineAdvance = Math.round(SPEC.chapterTitleSize * 1.4);
         y += titleWrapped.length * titleLineAdvance + 35;
-        // Epigraph \u2014 italic, slightly smaller than body, attribution
-        // smaller still. Wrap width is textW - 30 (15pt inset each
-        // side) for a modest visual indent.
+        // Epigraph \u2014 italic, set at body size (matches modern Penguin /
+        // Knopf / HarperCollins house style; the italic + horizontal
+        // indent provides visual subordination without making the
+        // epigraph harder to read). Attribution one point smaller.
+        // Wrap width is textW - 30 (15pt inset each side).
         if (ch.epigraph) {
-          const epSize = SPEC.bodySize - 1;
+          const epSize = SPEC.bodySize;
           const epLineAdvance = Math.round(epSize * 1.35);
-          const atSize = SPEC.bodySize - 2;
+          const atSize = SPEC.bodySize - 1;
           const atLineAdvance = Math.round(atSize * 1.35);
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
           const epLines = doc.splitTextToSize("\u201C" + ch.epigraph + "\u201D", textW - 30);
@@ -2941,16 +2944,18 @@
         for (const line of titleWrapped) { doc.text(line, getCenterX(), y, { align: "center" }); y += titleLineAdvance; }
         y += 35;
 
-        // Epigraph \u2014 typeset per Chicago / Bringhurst / New Hart's
-        // convention: italic, set in a slightly smaller measure than body
-        // (bodySize - 1), centered, with a modest horizontal inset
-        // (textW - 30). Attribution one point smaller still. Quote marks
-        // kept; some house styles drop them, but italics + size are not
-        // always enough signal in a reflowable PDF.
+        // Epigraph \u2014 italic, set at body size (matches modern Penguin /
+        // Knopf / HarperCollins house style). Earlier versions set at
+        // bodySize - 1 per the strict Chicago / Bringhurst rule, but the
+        // visual subordination from italic + indent is enough on its own;
+        // body-size epigraphs read with more presence and don't look
+        // pinched against the surrounding 10pt body. Attribution one
+        // point smaller still. Quote marks kept; some house styles drop
+        // them but italics alone aren't always enough signal.
         if (ch.epigraph) {
-          const epSize = SPEC.bodySize - 1;
+          const epSize = SPEC.bodySize;
           const epLineAdvance = Math.round(epSize * 1.35);
-          const atSize = SPEC.bodySize - 2;
+          const atSize = SPEC.bodySize - 1;
           const atLineAdvance = Math.round(atSize * 1.35);
           doc.setFont(EPIGRAPH_FONT, "italic"); doc.setFontSize(epSize);
           const epText = "\u201C" + ch.epigraph + "\u201D";
@@ -3458,10 +3463,10 @@
         // so consecutive bullets / numbered items read as a unit rather
         // than separate paragraphs. Matches the PDF (half SPEC.paraGap).
         'p.list-item { margin: 0 0 0.25em; }',
-        // Epigraph — Chicago / Bringhurst / New Hart's: italic, equal to
-        // or slightly smaller than body, modest horizontal indent. 0.9em
-        // matches the PDF's bodySize - 1pt sizing.
-        'p.epigraph { font-style: italic; font-size: 0.9em; margin: 1.5em 1.5em; text-align: center; }',
+        // Epigraph — italic at body size (matches modern Penguin / Knopf /
+        // HarperCollins house style). Italic + horizontal indent gives
+        // visual subordination without making the epigraph hard to read.
+        'p.epigraph { font-style: italic; font-size: 1em; margin: 1.5em 1.5em; text-align: center; }',
         // Centered block image (body image markers ![alt](img-id))
         'p.figure { text-align: center; margin: 1.5em 0; }',
         'p.figure img { max-width: 100%; height: auto; }',
@@ -3477,8 +3482,8 @@
         // Scene break ornament: three centered asterisks separated by spaces,
         // wide breathing room above and below to read clearly as a transition.
         'p.scene-break { text-align: center; margin: 1.8em 0; letter-spacing: 0.5em; }',
-        // Attribution 1pt smaller still per convention.
-        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 1.5em 2em; font-size: 0.85em; }',
+        // Attribution one point smaller than the epigraph per convention.
+        'p.epigraph-attribution { font-style: italic; text-align: center; margin: 0 1.5em 2em; font-size: 0.9em; }',
         // chapter-num opens a new page; h1 that follows stays on the same page as the number.
         'p.chapter-num { text-align: center; font-size: 1.05em; margin: 2em 0 0.5em; page-break-before: always; break-before: page; page-break-after: avoid; break-after: avoid; }',
         // When there is no chapter-num (named section), h1 is the page opener. A dedicated
