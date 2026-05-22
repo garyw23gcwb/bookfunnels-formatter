@@ -149,9 +149,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.31",
+      version: "0.13.32",
       date: "2026-05-19",
       changes: [
+        "0.13.32 - TOC wrapped-title continuation lines now hang-indented (~1em). When a long chapter title wraps to a second line in the table of contents, trade-book convention (Chicago Manual §1.43, Bringhurst, New Hart's Rules, Penguin / Random House style) requires the SECOND and subsequent lines to be indented from the title's start so they visually attach to the first line as part of the same entry. Previously v0.13.19's wrap produced continuation lines flush at tocTextX, which made 'Business' on line 2 of 'What It Really Takes to Build an E-commerce / Business ........ 19' look like it could be a separate entry. Fix: line 0 stays at tocTextX (title start); lines 1+ render at tocTextX + tocWrapIndent (1.2 × tocEntrySize ≈ 12pt for 10pt body). Dot leaders and page number still right-align to the page-number column on the last line. Single-line entries are unaffected.",
         "0.13.31 - Subheading orphan prevention made robust. v0.13.25 reserved MIN(3, nextBodyLines) — but that didn't account for the body's own widow/orphan control (minLinesAtPageStart / minLinesAtPageEnd = 2). For a 4- or 5-line body paragraph following a heading, reserving only 3 lines left 1-2 lines remaining, which triggered the widow check and pushed the whole paragraph to the next page — orphaning the heading. The default 3-line reservation was also wrong when the next block was another heading, a table, an image, or a scene break (each of which needs more vertical space than 3 body lines). New reservation rules: (a) body next, N ≤ 5: reserve N lines (fit all, no widow trigger); (b) body next, N ≥ 6: reserve 3 (remaining ≥ 3 is above widow threshold); (c) heading next: reserve heading height + 3 body lines for ITS reservation; (d) scene break next: 3 line-heights; (e) table next: 5 line-heights (header + 2 rows); (f) image next: 6 line-heights. List items in the next-paragraph check are wrapped at the narrower hanging-indent width (textW - 25) so line count matches the actual list-item renderer output. Applied to both pass-1 calcBodyPages and pass-2 render so TOC stays accurate. All five subheading orphan cases the user could spot in trade output are now blocked.",
         "0.13.30 - Back-matter chapters (About the Author, Acknowledgments, etc.) no longer reserve a 25pt epigraph placeholder gap below their title. Trade-book convention (Chicago Manual §1.78-1.81, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark) sets end-matter sections more modestly than main chapters — no epigraph zone, smaller title-to-body gap. Previously every chapter, including back matter, allocated 35pt post-title + 25pt empty-epigraph placeholder = 60pt of dead space between the chapter title and the body content. On an About the Author page with an embedded photo, that gap made the photo float ~75pt below the title with no visual reason. Detection reuses the existing isLikelyBackMatter() / ch.includeInToc === false flag set at chapter-detection time (matches About the Author, About the Authors, Acknowledgments, Bibliography, Index, Colophon, Appendix, etc.). For back-matter chapters: post-title gap is 20pt instead of 35pt, and the empty-epigraph placeholder (25pt) is skipped entirely. Net reduction: ~40pt of dead space removed. Back matter that genuinely has an epigraph still renders it normally; only the no-epigraph placeholder is dropped. Mirrors in pass-1 calcOpeningHeight so the TOC stays accurate. Same flag already gates drop-cap skipping (v0.12.8); now it also gates epigraph-placeholder skipping — consistent treatment of back-matter pages.",
         "0.13.29 - Bulleted and numbered lists now use proper hanging indentation per trade-book convention (Chicago Manual §6.130-6.135, Bringhurst, New Hart's Rules, Penguin / Random House style, KDP / IngramSpark). Previously bullets sat flush at the body margin with continuation lines wrapping back to the bullet's x position — visually squashed and inconsistent with published trade typography. New layout: list block indented 14pt from the body margin, bullet hangs at the indent point with 6pt of breathing room before body text starts, and wrapped continuation lines align with the BODY TEXT (not the bullet). This is the 'hanging indent' pattern every major style authority specifies. Render path: a new list-item branch in pass 2 extracts the standardised bullet/number prefix, measures it dynamically, computes bulletX = textX + 14 and bodyX = bulletX + bulletWidth + 6, wraps body content at the narrower hanging-indent width (textW - 14 - bulletWidth - 6), and draws each line with the bullet only on the first line. Mirror logic in pass 1 calcBodyPages so TOC page counts stay accurate. EPUB matches: p.list-item gets padding-left:1.5em + text-indent:-1em for the hanging effect. Tight inter-item spacing (half SPEC.paraGap) from v0.13.20 preserved.",
@@ -2954,13 +2955,16 @@
         const maxTitleWidth = tocTextW - maxPageNumWidth - (gap * 2) - minDotsSpace;
 
         // Wrap long titles to multiple lines. Trade-book convention
-        // (Chicago Manual \u00a71.42, Bringhurst, New Hart's Rules, Penguin /
+        // (Chicago Manual \u00a71.43, Bringhurst, New Hart's Rules, Penguin /
         // Random House style): long chapter titles WRAP \u2014 they are not
         // truncated. The page number aligns with the LAST line; only the
-        // last line carries dot leaders. Continuation lines (the lines
-        // above the last) sit flush with the start of the title.
+        // last line carries dot leaders. CONTINUATION LINES ARE INDENTED
+        // (~1em) from the start of the title so they visually attach to
+        // the first line as part of the same entry rather than looking
+        // like a separate flush-left entry below.
         const titleLines = doc.splitTextToSize(displayTitle, maxTitleWidth);
         const lastLineIdx = titleLines.length - 1;
+        const tocWrapIndent = Math.round(tocEntrySize * 1.2); // ~1em hanging indent
 
         // If the whole entry won't fit on the current TOC page, break first
         // so the wrapped title isn't split across pages.
@@ -2971,21 +2975,26 @@
         }
 
         // Draw any continuation lines (everything except the last) first \u2014
-        // plain title text, no page number, no dots.
+        // plain title text, no page number, no dots. Line 0 is at the
+        // title's start (tocTextX); line 1+ are indented.
         for (let li = 0; li < lastLineIdx; li++) {
-          doc.text(titleLines[li], tocTextX, ty);
+          const lineX = (li === 0) ? tocTextX : (tocTextX + tocWrapIndent);
+          doc.text(titleLines[li], lineX, ty);
           ty += tocWrappedLineAdvance;
         }
 
-        // Draw the last line with page number + dot leaders.
+        // Draw the last line with page number + dot leaders. If the
+        // entry is multi-line, the last line is a continuation line
+        // and gets the hanging indent too.
         const lastLine = titleLines[lastLineIdx];
         const lastLineWidth = doc.getTextWidth(lastLine);
-        doc.text(lastLine, tocTextX, ty);
+        const lastLineX = (lastLineIdx === 0) ? tocTextX : (tocTextX + tocWrapIndent);
+        doc.text(lastLine, lastLineX, ty);
 
         const pageNumX = tocTextX + tocTextW;
         doc.text(pageNumStr, pageNumX, ty, { align: "right" });
 
-        const dotsStart = tocTextX + lastLineWidth + gap;
+        const dotsStart = lastLineX + lastLineWidth + gap;
         const dotsEnd = pageNumX - maxPageNumWidth - gap;
         if (dotsEnd > dotsStart) {
           // Right-align the dots against the page-number column so dots end at the same x on every row
