@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.13.39",
+      version: "0.13.40",
       date: "2026-05-22",
       changes: [
+        "0.13.40 - REAL gutter alternation fix. The v0.13.39 note that 'gutter alternation is correct' was wrong — verifying against Gary's exported PDF with pdftotext -bbox-layout showed a recurring pattern: every few pages, the BODY text was rendered at the opposite-parity left margin from where the page-number and running-header sat. Root cause: TWO code paths created new pages without refreshing the closure-scoped textX / textW variables that the body renderer uses to know its left edge. (1) The justified-body widow/orphan branches (the lines that fire when 1-2 lines would be widowed or orphaned across a page break) called newPage() + addRunningHeader + addPageNumber + bodyTopY + resetBodyFont, but did NOT do textX = getTextX(); textW = getTextWidth() — so the next paragraph after the forced break rendered using the OLD page's left margin. On a recto→verso transition that left the body at x=66 on a verso (which should be x=42); on a verso→recto transition it left the body at x=42 on a recto (which should be x=66). Both layouts SAW page-number and running-header in the right place (those use isRecto() at draw time), so the header / folio looked correct while the body was visibly off. (2) The same omission existed in the table path: after doc.autoTable() completes, if the table had spanned pages (autotable's didDrawPage hook had incremented pageNum), the local textX / textW were stale. Both branches now refresh textX / textW after their newPage calls. Other newPage call sites in the chapter loop (regular body wraps, image / scene-break / heading / list branches, drop-cap loop) were already refreshing correctly — only the two listed above were missed. This was the bug Gary reported on pages 92-93: the every-few-pages drift wasn't a single defective page, it was every page following a widow/orphan-triggered break.",
         "0.13.39 - Final fix for orphaned subheadings. Root cause: the heading's smart-break reservation (v0.13.31) guarantees AT LEAST N body lines fit after the heading, but actual available space is often slightly more — e.g. heading lands with 4 lines of space below when only 3 were reserved. For a 6-line body paragraph that means linesOnCurrentPage=4, remaining=2, which triggers the body's own widow control to push the WHOLE paragraph to the next page — orphaning the heading. The heading's smart-break and the body's widow control were re-evaluating the same situation and reaching opposite conclusions. Fix: skip widow/orphan control on the body paragraph that IMMEDIATELY FOLLOWS a heading. The heading's reservation already validated the layout; re-checking is redundant and harmful. Implementation: new prevWasHeading flag, captured-and-cleared at the top of each paragraph iteration (headingPrecedes), set true by the H2/H3 branch, consumed by the body widow check (both run-based and justified paths). Same flag added to pass-1 calcBodyPages so TOC counts mirror the renderer. Separate notes: (1) Missing-image placeholder ('[missing image: img-XXX]') on the About the Author page is the existing browser autosave limitation — image bytes exceed localStorage quota so they get stripped on reload. Re-upload the image in Step 3. (2) Verified gutter alternation is correct — verso pages render left margin 42pt (outside) / right margin 66pt (gutter on spine side); recto pages render left 66pt (gutter on spine side) / right 42pt (outside). The 24pt difference is visually subtle but present; clearest visual confirmation is page-number alternation (verso left, recto right) which the code does correctly.",
         "0.13.38 - Epigraph wrap width matched to body / chapter-title width. Previously the epigraph wrapped at textW - 30 (15pt side-inset) per the traditional Chicago / Bringhurst convention. Modern trade-paperback house styles (Penguin Press, Crown, Knopf) set epigraphs at full body width and rely on italic + center alignment alone for visual subordination — no extra inset needed. For Gary's 5x8 tinybook format, body-width epigraphs read cleaner and share the same measure as the chapter title (which was already at body width — its visual narrowness on the page came from centering shorter lines, not from any extra padding). Both passes (calcOpeningHeight dry-run and pass-2 render) and EPUB CSS updated: p.epigraph margin 1.5em 1.5em → 1.5em 0, p.epigraph-attribution margin 0 1.5em 2em → 0 0 2em. NO change to chapter title — it was already correctly set at body width.",
         "0.13.37 - Chapter title reduced from 18pt to 17pt for a more mid-convention feel. The 1.6-1.8× body range that Chicago Manual, Bringhurst, Penguin RH, and Knopf all specify for 5x8 trade paperback chapter titles puts the 'comfortable middle' at 1.7×. 18pt (1.8×) sat at the upper edge — readable but felt visually heavy on multi-line wrapped titles. 17pt (1.7×) reads as distinctly a chapter title without dominating the page. Line advance auto-scales via the existing chapterTitleSize × 1.4 formula (now ~24pt instead of 25pt). Title-to-num-label gap stays clear via the bold weight on the title contrasting with the regular 14pt num label.",
@@ -3410,6 +3411,13 @@
               y += SPEC.lineHeight + TABLE_GAP;
             }
             resetBodyFont();
+            // Refresh textX/textW after the table — autotable may have
+            // advanced the page via its own page-break path (didDrawPage),
+            // and the mirrored verso/recto margins mean the body left
+            // edge may have flipped. Subsequent paragraphs MUST read from
+            // the current page's margins, not the page where the table
+            // started.
+            textX = getTextX(); textW = getTextWidth();
             continue;
           }
 
@@ -3725,6 +3733,7 @@
                 addPageNumber(bookPageNum + pagesUsed);
                 y = bodyTopY();
                 resetBodyFont();
+                textX = getTextX(); textW = getTextWidth();
               }
             }
 
@@ -3735,6 +3744,7 @@
               addPageNumber(bookPageNum + pagesUsed);
               y = bodyTopY();
               resetBodyFont();
+              textX = getTextX(); textW = getTextWidth();
             }
           }
 
