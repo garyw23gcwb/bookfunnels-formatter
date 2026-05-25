@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.0",
+      version: "0.14.1",
       date: "2026-05-25",
       changes: [
+        "0.14.1 - Markdown export replaced with plain-text (.txt) export for Tinybook Audio Studio. Markdown turned out to be the wrong format — TTS engines read asterisks, hash marks, and pipes literally ('asterisk asterisk Mountain asterisk asterisk') which ruins narration. New generateText() output is clean prose: book title + subtitle + author at the top, then each chapter prefixed by 'Chapter N: Title' on its own line, epigraph with em-dash attribution, body content with ALL markdown markers stripped via a new stripInlineMarkers helper (***/**/*/__ removed) and a flattenBody helper that walks the same paragraph splitter / classifier the PDF and EPUB use so the chunking matches. Scene breaks become blank lines (a pause cue, not three spoken asterisks). Tables flatten to 'cell — cell — cell' rows. Images are dropped. List bullets are dropped, item text kept. Alignment prefixes already stripped by classifyParagraph. Step 3 button reads 'Generate Text (Audio)', Step 4 download reads 'Download Text (Audio)', filename pattern is {Title_With_Underscores}_Audio.txt. State variable renamed from mdUrl to txtUrl across the new-project / load-project / back-to-preview reset paths. Audiobook-step tip in the Step 4 panel updated to mention .txt → Tinybook Audio Studio.",
         "0.14.0 - Markdown export added as a third output alongside PDF and EPUB. Intended primary use: upload to Tinybook Audio Studio for the audiobook version. New generateMarkdown(bookData, chapters, onProgress) builds a single .md file with the book title + subtitle + author block at the top, optional Reader Bonus, optional dedication, every chapter as a level-1 heading with epigraph as blockquote and body as-is, plus the back-of-book CTA repeated at the end. STRIPPED from the markdown: copyright page (legal boilerplate, not narrated), TOC (audiobooks don't have one), inline image markers (audio can't render images), alignment prefixes (:left:/:center:/:right: — audio is linear). PRESERVED as-is so audio narration can use them as emphasis cues: **bold**, *italic*, ***bolditalic***, __underline__, body H2/H3 subheadings, markdown tables, scene breaks (* * *), bulleted and numbered lists. Step 3 now has three side-by-side buttons (Generate Markdown / Generate EPUB / Generate PDF), Step 4 shows a Download Markdown button alongside the PDF and EPUB ones plus an 'Also Generate Markdown' option if you only ran one format. Filename pattern matches the others: {Title_With_Underscores}.md. The autosave / project-switch / new-project paths also reset mdUrl so blob URLs from the previous session don't bleed across.",
         "0.13.41 - Bold-italic (***text***) regression fix. Gary spotted literal asterisks rendering around 'The Myth and the Mountain' in the front matter — the v0.13.2 bolditalic path was failing on his actual source text. Reading his autosaved chapter body via localStorage showed the manuscript contains `***The Myth and the Mountain****.*` — three opening asterisks but FOUR between Mountain and the period (a typo), then `.*` as a trailing italic. The parser's strict guard `text[end + 3] !== \"*\"` REJECTED the triple match whenever a stray asterisk followed the closing `***`, then fell through to the `**bold**` rule which captured `*The Myth and the Mountain` (with leading literal `*`) as a bold run. The EPUB regex `\\*\\*\\*([^*]+?)\\*\\*\\*` is greedy-first-match and produced the correct `<strong><em>...</em></strong><em>.</em>` so the PDF and EPUB diverged. Fix: drop the `text[end + 3] !== \"*\"` guard so parseInlineRuns also takes the FIRST `***` it finds as the closing marker. Gary's text now parses as bolditalic 'The Myth and the Mountain' + italic '.' — both PDF and EPUB agree. Other well-formed cases (***foo*** alone, ***foo*** between prose, nested formatting via the wrap order in htmlToMarkdownLite) are unchanged because they never trigger the rejected branch. The italic and bold rules below it keep their existing `text[end + 1] !== \"*\"` guards because they DO disambiguate `**bold**` from `*italic*`-of-`*bold*` at the OPENING position — only the triple rule was over-strict.",
         "0.13.40 - REAL gutter alternation fix. The v0.13.39 note that 'gutter alternation is correct' was wrong — verifying against Gary's exported PDF with pdftotext -bbox-layout showed a recurring pattern: every few pages, the BODY text was rendered at the opposite-parity left margin from where the page-number and running-header sat. Root cause: TWO code paths created new pages without refreshing the closure-scoped textX / textW variables that the body renderer uses to know its left edge. (1) The justified-body widow/orphan branches (the lines that fire when 1-2 lines would be widowed or orphaned across a page break) called newPage() + addRunningHeader + addPageNumber + bodyTopY + resetBodyFont, but did NOT do textX = getTextX(); textW = getTextWidth() — so the next paragraph after the forced break rendered using the OLD page's left margin. On a recto→verso transition that left the body at x=66 on a verso (which should be x=42); on a verso→recto transition it left the body at x=42 on a recto (which should be x=66). Both layouts SAW page-number and running-header in the right place (those use isRecto() at draw time), so the header / folio looked correct while the body was visibly off. (2) The same omission existed in the table path: after doc.autoTable() completes, if the table had spanned pages (autotable's didDrawPage hook had incremented pageNum), the local textX / textW were stale. Both branches now refresh textX / textW after their newPage calls. Other newPage call sites in the chapter loop (regular body wraps, image / scene-break / heading / list branches, drop-cap loop) were already refreshing correctly — only the two listed above were missed. This was the bug Gary reported on pages 92-93: the every-few-pages drift wasn't a single defective page, it was every page following a widow/orphan-triggered break.",
@@ -4213,142 +4214,209 @@
       return blob;
     }
 
-    // ---- Markdown export ----
+    // ---- Plain-text export ----
     //
-    // Produces a single .md file with the manuscript in clean markdown.
-    // Intended as input for Tinybook Audio Studio (audiobook narration) and
-    // for any other downstream tool that wants a plain-text reflowable copy
-    // of the book.
+    // Produces a single .txt file with the manuscript stripped of all
+    // markdown markup. Intended as input for Tinybook Audio Studio (and
+    // any other TTS / audiobook tool) — narration engines choke on stray
+    // asterisks, hash marks, table pipes, etc., so the cleanest signal is
+    // a plain prose stream with clear chapter breaks.
     //
     // What's included:
     //   - Book title + subtitle + author at the top
-    //   - Front-matter Reader Bonus if set (so the audiobook can mention it)
+    //   - Front-matter Reader Bonus (so the narrator can mention the URL)
     //   - Dedication if set
-    //   - Every chapter with its number-label + title as a level-1 heading,
-    //     epigraph as a blockquote, body as-is
+    //   - Every chapter prefixed by its number-label + title on its own
+    //     line, followed by a blank line, then the body prose
     //   - Back-of-book Reader Bonus repeated at the end (matches PDF/EPUB)
     //
     // What's stripped:
-    //   - Copyright page (legal boilerplate, not narrated)
-    //   - TOC (audiobooks don't have one)
-    //   - Running headers, folios, layout artifacts (not in the source anyway)
-    //   - Inline image markers (audiobooks can't render them)
-    //   - Alignment prefixes (:center:, :left:, :right:) — audio is linear
+    //   - All inline markdown markers (**, *, ***, __) — punctuation only
+    //     in the output, no asterisks left for the TTS engine to read out
+    //     loud as "asterisk"
+    //   - ## / ### heading prefixes (text kept, marker dropped)
+    //   - Image markers (audio can't render images)
+    //   - Alignment prefixes (:left: / :center: / :right:)
+    //   - Markdown tables (TTS reads pipes literally — flattened to one
+    //     line per row with cells joined by " — ")
+    //   - Scene-break ornaments (* * *) — replaced with a blank line so the
+    //     narrator pauses but doesn't say "asterisk asterisk asterisk"
+    //   - Bullet glyphs (•, -, *, 1.) at line start (text kept, marker dropped)
+    //   - URLs in Reader Bonus rendered as "Visit colon URL" inline so they
+    //     read naturally
     //
-    // What's preserved as-is:
-    //   - **bold**, *italic*, ***bolditalic***, __underline__ inline markers
-    //     (audio studios use these as emphasis cues for narration)
-    //   - Body H2 / H3 subheadings (## / ### preserved)
-    //   - Markdown tables (the studio can flatten them or read them aloud)
-    //   - Scene breaks (* * *)
-    //   - Bulleted / numbered lists
-    async function generateMarkdown(bookData, chapters, onProgress) {
-      onProgress("Building markdown...");
+    // What's preserved:
+    //   - Smart quotes, em-dashes, ellipsis — natural narration punctuation
+    //   - Paragraph breaks (blank lines between paragraphs)
+    //   - Sentence punctuation
+    async function generateText(bookData, chapters, onProgress) {
+      onProgress("Building text file...");
       bookData = smartQuotesDeep(bookData);
       chapters = smartQuotesDeep(chapters);
 
+      // Strip ALL markdown-lite markup from a single line of text. Order
+      // matters: ***triple*** must be handled before ** and *, and __ must be
+      // handled before paragraph processing. The regexes match non-greedy
+      // content (`[\s\S]*?`) so multiple emphasis runs on one line each
+      // resolve independently.
+      function stripInlineMarkers(s) {
+        if (!s) return "";
+        let t = String(s);
+        t = t.replace(/\*\*\*([\s\S]*?)\*\*\*/g, "$1");
+        t = t.replace(/\*\*([\s\S]*?)\*\*/g, "$1");
+        t = t.replace(/\*([\s\S]*?)\*/g, "$1");
+        t = t.replace(/__([\s\S]*?)__/g, "$1");
+        return t;
+      }
+
+      // Flatten a chapter body from markdown-lite into clean prose lines.
+      // Removes structural markers, leaves the words. Scene breaks become a
+      // blank line. Tables become "cell — cell — cell" lines. Headings keep
+      // their text but lose the ## / ### prefix.
+      function flattenBody(body) {
+        if (!body) return "";
+        const out = [];
+        // Use the existing splitter so tables stay as multi-line blocks and
+        // scene breaks land as their own paragraph — matches the PDF / EPUB
+        // chunking exactly, so the chapter content the audio engine receives
+        // mirrors the print version.
+        const paragraphs = splitChapterBody(body);
+        for (const p of paragraphs) {
+          const cls = classifyParagraph(p);
+          if (cls.type === "scenebreak") {
+            // Blank line is enough of a pause cue for narration. Don't emit
+            // the asterisks or the TTS engine will read them out loud.
+            out.push("");
+            continue;
+          }
+          if (cls.type === "image") {
+            // Audiobooks skip images entirely. Drop the marker.
+            continue;
+          }
+          if (cls.type === "table") {
+            // Flatten each row into "cell — cell — cell". The header row
+            // becomes its own line; the separator row is omitted; body rows
+            // follow. An em-dash between cells reads naturally as a pause
+            // rather than tripping the TTS engine.
+            const tbl = cls.table || {};
+            const rows = [];
+            if (Array.isArray(tbl.header) && tbl.header.length) {
+              rows.push(tbl.header.map(stripInlineMarkers));
+            }
+            if (Array.isArray(tbl.rows)) {
+              for (const r of tbl.rows) rows.push(r.map(stripInlineMarkers));
+            }
+            for (const r of rows) out.push(r.filter(Boolean).join(" — "));
+            out.push("");
+            continue;
+          }
+          if (cls.type === "h2" || cls.type === "h3") {
+            // Strip the ## / ### prefix — keep just the text. Add a blank
+            // line above for paragraph separation; the heading text reads as
+            // a strong opening for the next passage.
+            out.push("");
+            out.push(stripInlineMarkers(cls.text || ""));
+            out.push("");
+            continue;
+          }
+          // Body paragraph. cls.text already has the alignment prefix
+          // stripped (classifyParagraph handles :left:/:center:/:right:).
+          // For list items, strip the leading bullet/number so the line
+          // reads as plain prose.
+          let txt = String(cls.text || p);
+          if (cls.isListItem) {
+            txt = txt.replace(/^\s*(?:[•\-*·‣▪◦●○⧁]|\d+[.)])\s+/, "");
+          }
+          out.push(stripInlineMarkers(txt));
+          out.push("");
+        }
+        return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      }
+
       const lines = [];
 
-      // Front matter header — book title, subtitle, author. Single H1 for the
-      // book itself; each chapter gets its own H1 below. Most markdown viewers
-      // and audio-studio splitters key on lines starting with "# " so this
-      // structure is the most portable.
-      lines.push("# " + (bookData.title || "Untitled"));
+      // Book title + subtitle + author at the top. No markdown markers, just
+      // plain text the narrator can read.
+      lines.push(bookData.title || "Untitled");
       lines.push("");
       if (bookData.subtitle) {
-        lines.push("**" + bookData.subtitle + "**");
+        lines.push(bookData.subtitle);
         lines.push("");
       }
       if (bookData.author) {
         lines.push("by " + bookData.author);
         lines.push("");
       }
-      lines.push("---");
       lines.push("");
 
-      // Front Reader Bonus / lead capture CTA — included so the narrator can
-      // mention the bonus URL at the start of the audiobook.
+      // Front Reader Bonus — included so the narrator can mention the URL
+      // up front. URL is read out plainly so the TTS handles it naturally.
       if (bookData.ctaTitle || bookData.ctaBody) {
-        lines.push("# " + (bookData.ctaTitle || "Reader Bonus"));
-        lines.push("");
+        if (bookData.ctaTitle) {
+          lines.push(stripInlineMarkers(bookData.ctaTitle));
+          lines.push("");
+        }
         if (bookData.ctaBody) {
-          lines.push(bookData.ctaBody);
+          lines.push(stripInlineMarkers(bookData.ctaBody));
           lines.push("");
         }
         if (bookData.ctaUrl) {
           lines.push("Visit: " + bookData.ctaUrl);
           lines.push("");
         }
-        lines.push("---");
         lines.push("");
       }
 
-      // Dedication — short, optional, traditionally narrated by some authors.
+      // Dedication — short prose passage, often narrated by the author.
       if (bookData.dedication) {
-        lines.push("# Dedication");
+        lines.push("Dedication");
         lines.push("");
         const dedLines = String(bookData.dedication).split(/\n/);
-        for (const dl of dedLines) lines.push(dl);
+        for (const dl of dedLines) lines.push(stripInlineMarkers(dl));
         lines.push("");
-        lines.push("---");
         lines.push("");
       }
 
-      // Chapters. Includes both narrative chapters and back-matter sections
-      // (About the Author, Acknowledgments, etc.) — the audio studio decides
-      // which to narrate. ch.num is the "Chapter 5" / "Introduction" label
-      // pulled at detect time; ch.title is the chapter title proper. Combine
-      // them as "Chapter 5: Title" for the heading.
+      // Chapters. The "Chapter 5: Title" header on its own line gives the
+      // audio engine a clear segmentation point. ch.num is the label captured
+      // at detect time ("Chapter 5", "Introduction", etc.); ch.title is the
+      // chapter title proper. Both back-matter (About the Author, etc.) and
+      // narrative chapters are included — the studio decides what to narrate.
       for (const ch of chapters) {
         let heading = ch.title || "Untitled";
         if (ch.num) heading = ch.num + ": " + heading;
-        lines.push("# " + heading);
+        lines.push(stripInlineMarkers(heading));
         lines.push("");
 
-        // Epigraph as a blockquote with attribution on its own line. Multi-line
-        // epigraphs preserve their line breaks (each line gets the "> " prefix
-        // so markdown renders it as one continuous block quote).
+        // Epigraph as plain prose with an em-dash attribution. No quote marks
+        // added — the TTS engine handles smart quotes already in the source.
         if (ch.epigraph) {
           const epigraphLines = String(ch.epigraph).split(/\n/);
-          for (const el of epigraphLines) lines.push("> " + el);
+          for (const el of epigraphLines) lines.push(stripInlineMarkers(el));
           if (ch.epigraphAttribution) {
-            lines.push("> ");
-            lines.push("> — " + ch.epigraphAttribution);
+            lines.push("— " + stripInlineMarkers(ch.epigraphAttribution));
           }
           lines.push("");
         }
 
-        // Body. Strip image markers (audio-only output can't render images)
-        // and alignment prefixes (audio is linear, alignment is a visual cue).
-        // Everything else — markdown headings, bold/italic markers, lists,
-        // tables, scene breaks — passes through untouched.
-        let body = String(ch.body || "");
-        // Image marker forms used by the editor:
-        //   "📷 filename — img-abc123"   (camera emoji form)
-        //   "![alt text](img-abc123)"                    (legacy markdown form)
-        body = body.replace(/^[ \t]*📷[^\n]*?img-[a-z0-9]+[^\n]*$/gm, "");
-        body = body.replace(/!\[[^\]]*\]\(img-[a-z0-9]+\)/g, "");
-        // Alignment prefixes — :left: / :center: / :right: at line start.
-        body = body.replace(/^:(?:left|center|right):\s*/gim, "");
-        // Collapse any 3+ blank lines created by the strips above.
-        body = body.replace(/\n{3,}/g, "\n\n").trim();
-        if (body) {
-          lines.push(body);
+        const bodyClean = flattenBody(ch.body || "");
+        if (bodyClean) {
+          lines.push(bodyClean);
           lines.push("");
         }
 
-        lines.push("---");
         lines.push("");
       }
 
-      // Back-of-book CTA — repeats the front Reader Bonus so the audiobook
-      // can include a closing reminder of the bonus URL. Mirrors the PDF /
-      // EPUB which place a CTA page after the final chapter.
+      // Back-of-book CTA — closing reminder of the bonus URL, mirrors the
+      // PDF / EPUB which place a CTA page after the final chapter.
       if (bookData.ctaTitle || bookData.ctaBody) {
-        lines.push("# " + (bookData.ctaTitle || "Reader Bonus"));
-        lines.push("");
+        if (bookData.ctaTitle) {
+          lines.push(stripInlineMarkers(bookData.ctaTitle));
+          lines.push("");
+        }
         if (bookData.ctaBody) {
-          lines.push(bookData.ctaBody);
+          lines.push(stripInlineMarkers(bookData.ctaBody));
           lines.push("");
         }
         if (bookData.ctaUrl) {
@@ -4357,8 +4425,10 @@
         }
       }
 
-      const md = lines.join("\n");
-      const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+      // Collapse any 4+ blank-line runs introduced by empty sections so the
+      // final file doesn't have huge vertical gaps.
+      const txt = lines.join("\n").replace(/\n{4,}/g, "\n\n\n");
+      const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
       return blob;
     }
 
@@ -5350,7 +5420,7 @@
       const [error, setError] = useState("");
       const [pdfUrl, setPdfUrl] = useState(null);
       const [epubUrl, setEpubUrl] = useState(null);
-      const [mdUrl, setMdUrl] = useState(null);
+      const [txtUrl, setTxtUrl] = useState(null);
       const [textSizePreset, setTextSizePreset] = useState(initialProject.textSizePreset || 'default');
       const [bookData, setBookData] = useState(Object.assign({}, BLANK_BOOK_DATA, initialProject.bookData || {}));
       const [rawText, setRawText] = useState(typeof initialProject.rawText === "string" ? initialProject.rawText : "");
@@ -5469,7 +5539,7 @@
         setStep(0);
         setPdfUrl(null);
         setEpubUrl(null);
-        setMdUrl(null);
+        setTxtUrl(null);
         setError("");
         setProgress("");
         setTextSizePreset('default');
@@ -5504,7 +5574,7 @@
         setTextSizePreset(target.textSizePreset || "default");
         setPdfUrl(null);
         setEpubUrl(null);
-        setMdUrl(null);
+        setTxtUrl(null);
         setError("");
         setProgress("");
       };
@@ -5655,16 +5725,16 @@
         }
       };
 
-      const handleGenerateMd = async function() {
+      const handleGenerateTxt = async function() {
         setGenerating(true); setProgress("Starting..."); setError("");
         try {
-          const blob = await generateMarkdown(bookData, chapters, setProgress);
-          if (!blob || blob.size === 0) { setError("Markdown generation produced an empty file."); return; }
-          setMdUrl(URL.createObjectURL(blob));
+          const blob = await generateText(bookData, chapters, setProgress);
+          if (!blob || blob.size === 0) { setError("Text generation produced an empty file."); return; }
+          setTxtUrl(URL.createObjectURL(blob));
           setStep(4);
         } catch (err) {
-          console.error("Markdown generation error:", err);
-          setError("Markdown generation failed: " + (err.message || String(err)));
+          console.error("Text generation error:", err);
+          setError("Text generation failed: " + (err.message || String(err)));
         } finally {
           setGenerating(false);
         }
@@ -5998,7 +6068,7 @@
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20, gap: 10, flexWrap: "wrap" }}>
                   <Button variant="secondary" onClick={function() { setStep(2); }}>&larr; Back</Button>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <Button variant="secondary" onClick={handleGenerateMd} disabled={generating}>{generating ? "Working..." : "Generate Markdown"}</Button>
+                    <Button variant="secondary" onClick={handleGenerateTxt} disabled={generating}>{generating ? "Working..." : "Generate Text (Audio)"}</Button>
                     <Button variant="secondary" onClick={handleGenerateEpub} disabled={generating}>{generating ? "Working..." : "Generate EPUB"}</Button>
                     <Button onClick={handleGenerate} disabled={generating}>{generating ? "Generating..." : "Generate PDF"}</Button>
                   </div>
@@ -6006,7 +6076,7 @@
               </div>
             )}
 
-            {step === 4 && (pdfUrl || epubUrl || mdUrl) && (
+            {step === 4 && (pdfUrl || epubUrl || txtUrl) && (
               <div style={{ textAlign: "center", paddingTop: 40 }}>
                 <div style={{ width: 64, height: 64, borderRadius: 16, background: BRAND.success + "15", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 28 }}>&#10003;</div>
                 <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Your Tinybook is Ready</h2>
@@ -6018,8 +6088,8 @@
                   {epubUrl && (
                     <a href={epubUrl} download={(bookData.title.replace(/\s+/g, "_")) + ".epub"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accentDeep, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 1px 3px rgba(79, 95, 217, 0.35)" }}>&darr; Download EPUB</a>
                   )}
-                  {mdUrl && (
-                    <a href={mdUrl} download={(bookData.title.replace(/\s+/g, "_")) + ".md"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accentDeep, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 1px 3px rgba(79, 95, 217, 0.35)" }}>&darr; Download Markdown</a>
+                  {txtUrl && (
+                    <a href={txtUrl} download={(bookData.title.replace(/\s+/g, "_")) + "_Audio.txt"} style={{ padding: "13px 32px", borderRadius: 10, background: BRAND.accentDeep, color: BRAND.white, fontWeight: 700, fontSize: 15, fontFamily: FONT, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 1px 3px rgba(79, 95, 217, 0.35)" }}>&darr; Download Text (Audio)</a>
                   )}
                   {!pdfUrl && (
                     <Button variant="secondary" onClick={handleGenerate} disabled={generating}>Also Generate PDF</Button>
@@ -6027,10 +6097,10 @@
                   {!epubUrl && (
                     <Button variant="secondary" onClick={handleGenerateEpub} disabled={generating}>Also Generate EPUB</Button>
                   )}
-                  {!mdUrl && (
-                    <Button variant="secondary" onClick={handleGenerateMd} disabled={generating}>Also Generate Markdown</Button>
+                  {!txtUrl && (
+                    <Button variant="secondary" onClick={handleGenerateTxt} disabled={generating}>Also Generate Text (Audio)</Button>
                   )}
-                  <Button variant="secondary" onClick={function() { setPdfUrl(null); setEpubUrl(null); setMdUrl(null); setStep(3); }}>Back to Preview</Button>
+                  <Button variant="secondary" onClick={function() { setPdfUrl(null); setEpubUrl(null); setTxtUrl(null); setStep(3); }}>Back to Preview</Button>
                 </div>
                 <div style={{ marginTop: 40, padding: 16, background: BRAND.white, borderRadius: 10, border: "1px solid " + BRAND.border, textAlign: "left", maxWidth: 480, margin: "40px auto 0" }}>
                   <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: BRAND.navy, fontFamily: FONT }}>Before sending to print or publish:</div>
@@ -6041,7 +6111,7 @@
                     4. Confirm page numbers and running headers are correct<br />
                     5. Review the table of contents<br />
                     6. For EPUB: test in Apple Books or Kindle Previewer before uploading to retailers<br />
-                    7. For Markdown: upload to Tinybook Audio Studio for the audiobook version
+                    7. For Audio Text (.txt): upload to Tinybook Audio Studio for the audiobook version
                   </div>
                 </div>
               </div>
