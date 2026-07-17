@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.1",
+      version: "0.14.2",
       date: "2026-05-25",
       changes: [
+        "0.14.2 - TOC entries now break at natural clause boundaries instead of orphaning articles and prepositions. Gary noticed the Looks Profitable interior had 'Chapter 1: Confront. The Truth Behind the / Numbers' — 'the' stranded at end of line 1, 'Numbers' orphaned alone on line 2 — and similar issues on Chapters 3, 5, 6, 7. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style): a TOC line must never end with an article ('a', 'an', 'the') or a preposition / conjunction ('of', 'in', 'on', 'to', 'for', 'and'...) — those words attach forward to the noun they modify, so they must stay on the SAME line as that noun. Breaks at punctuation (colon, period, comma) are the strongest natural pause and preferred over anything else. The previous renderer used jsPDF's built-in splitTextToSize, a greedy word-fit algorithm with zero awareness of typographic conventions — it happily orphaned articles at line ends. New helper smartTOCWrap replaces that call in the TOC path (chapter opener wrap and everything else untouched). It scores every viable 2-line split with a small heuristic: hard penalty for orphan words at line 1 end, reward for line 1 ending with clause punctuation, small penalty for a trivially-short line 1 (keeps 'Chapter 1:' alone from beating 'Chapter 1: Confront.'), and a balance term so both lines end up close to equal width. For Gary's book: 'Chapter 1: Confront. / The Truth Behind the Numbers', 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You', 'Chapter 5: Implement. / Build the System That Runs Without You', 'Chapter 6: Take Control. / From Reactive to in Command', 'Chapter 7: Yield. / The Returns of a Financially Clear Business' — every break is now at the action-verb boundary with the descriptive clause intact on line 2. Single-line entries (short titles that fit) are unchanged. 3+ line entries (extremely long titles) fall back to splitTextToSize.",
         "0.14.1 - Markdown export replaced with plain-text (.txt) export for Tinybook Audio Studio. Markdown turned out to be the wrong format — TTS engines read asterisks, hash marks, and pipes literally ('asterisk asterisk Mountain asterisk asterisk') which ruins narration. New generateText() output is clean prose: book title + subtitle + author at the top, then each chapter prefixed by 'Chapter N: Title' on its own line, epigraph with em-dash attribution, body content with ALL markdown markers stripped via a new stripInlineMarkers helper (***/**/*/__ removed) and a flattenBody helper that walks the same paragraph splitter / classifier the PDF and EPUB use so the chunking matches. Scene breaks become blank lines (a pause cue, not three spoken asterisks). Tables flatten to 'cell — cell — cell' rows. Images are dropped. List bullets are dropped, item text kept. Alignment prefixes already stripped by classifyParagraph. Step 3 button reads 'Generate Text (Audio)', Step 4 download reads 'Download Text (Audio)', filename pattern is {Title_With_Underscores}_Audio.txt. State variable renamed from mdUrl to txtUrl across the new-project / load-project / back-to-preview reset paths. Audiobook-step tip in the Step 4 panel updated to mention .txt → Tinybook Audio Studio.",
         "0.14.0 - Markdown export added as a third output alongside PDF and EPUB. Intended primary use: upload to Tinybook Audio Studio for the audiobook version. New generateMarkdown(bookData, chapters, onProgress) builds a single .md file with the book title + subtitle + author block at the top, optional Reader Bonus, optional dedication, every chapter as a level-1 heading with epigraph as blockquote and body as-is, plus the back-of-book CTA repeated at the end. STRIPPED from the markdown: copyright page (legal boilerplate, not narrated), TOC (audiobooks don't have one), inline image markers (audio can't render images), alignment prefixes (:left:/:center:/:right: — audio is linear). PRESERVED as-is so audio narration can use them as emphasis cues: **bold**, *italic*, ***bolditalic***, __underline__, body H2/H3 subheadings, markdown tables, scene breaks (* * *), bulleted and numbered lists. Step 3 now has three side-by-side buttons (Generate Markdown / Generate EPUB / Generate PDF), Step 4 shows a Download Markdown button alongside the PDF and EPUB ones plus an 'Also Generate Markdown' option if you only ran one format. Filename pattern matches the others: {Title_With_Underscores}.md. The autosave / project-switch / new-project paths also reset mdUrl so blob URLs from the previous session don't bleed across.",
         "0.13.41 - Bold-italic (***text***) regression fix. Gary spotted literal asterisks rendering around 'The Myth and the Mountain' in the front matter — the v0.13.2 bolditalic path was failing on his actual source text. Reading his autosaved chapter body via localStorage showed the manuscript contains `***The Myth and the Mountain****.*` — three opening asterisks but FOUR between Mountain and the period (a typo), then `.*` as a trailing italic. The parser's strict guard `text[end + 3] !== \"*\"` REJECTED the triple match whenever a stray asterisk followed the closing `***`, then fell through to the `**bold**` rule which captured `*The Myth and the Mountain` (with leading literal `*`) as a bold run. The EPUB regex `\\*\\*\\*([^*]+?)\\*\\*\\*` is greedy-first-match and produced the correct `<strong><em>...</em></strong><em>.</em>` so the PDF and EPUB diverged. Fix: drop the `text[end + 3] !== \"*\"` guard so parseInlineRuns also takes the FIRST `***` it finds as the closing marker. Gary's text now parses as bolditalic 'The Myth and the Mountain' + italic '.' — both PDF and EPUB agree. Other well-formed cases (***foo*** alone, ***foo*** between prose, nested formatting via the wrap order in htmlToMarkdownLite) are unchanged because they never trigger the rejected branch. The italic and bold rules below it keep their existing `text[end + 1] !== \"*\"` guards because they DO disambiguate `**bold**` from `*italic*`-of-`*bold*` at the OPENING position — only the triple rule was over-strict.",
@@ -3044,6 +3045,93 @@
       // ENTRIES stays at tocRowAdvance.
       const tocWrappedLineAdvance = Math.round(tocEntrySize * 1.35);
 
+      // Smart wrap for TOC entries. Trade-book convention
+      // (Chicago \u00a71.42-1.43, Bringhurst, New Hart's Rules, Penguin /
+      // Random House style): a TOC entry's line break should feel natural.
+      // Never end a line with an ARTICLE ('a', 'an', 'the') or a
+      // PREPOSITION / conjunction ('of', 'in', 'on', 'to', 'for', 'and',
+      // 'or'...) \u2014 those words attach forward to the noun they modify,
+      // so they must stay on the SAME line as that noun. Prefer breaks
+      // at punctuation (colon, period, comma) which the reader already
+      // parses as a pause. Fall back to a balanced-split search.
+      // jsPDF's built-in splitTextToSize is greedy word-fit only, so
+      // it happily orphans articles at line ends \u2014 this helper replaces
+      // that call for TOC titles specifically.
+      const TOC_ORPHAN_WORDS = new Set([
+        "a", "an", "the",
+        "of", "in", "on", "at", "to", "for", "with", "by", "from",
+        "up", "into", "onto", "over", "under", "about",
+        "and", "or", "but", "nor", "yet", "so",
+        "is", "as", "if"
+      ]);
+      function smartTOCWrap(text, maxWidth, fontStyle) {
+        doc.setFont(BODY_FONT, fontStyle); doc.setFontSize(tocEntrySize);
+        if (doc.getTextWidth(text) <= maxWidth) return [text];
+        const words = text.split(/\s+/).filter(Boolean);
+        if (words.length < 2) return doc.splitTextToSize(text, maxWidth);
+
+        // Compute the greedy MAX split point i where words[0..i-1] still
+        // fits on a single line at maxWidth. We prefer break points AT
+        // OR BEFORE this greedy cap so both lines stay within maxWidth.
+        let maxGreedyI = 0;
+        for (let i = 1; i <= words.length; i++) {
+          const line = words.slice(0, i).join(" ");
+          if (doc.getTextWidth(line) <= maxWidth) maxGreedyI = i;
+          else break;
+        }
+        // Also require the remaining tail to fit on line 2.
+        const fitsBoth = function(i) {
+          if (i < 1 || i >= words.length) return false;
+          const a = words.slice(0, i).join(" ");
+          const b = words.slice(i).join(" ");
+          return doc.getTextWidth(a) <= maxWidth && doc.getTextWidth(b) <= maxWidth;
+        };
+
+        // Score a candidate split point. Lower score = better.
+        // We penalise orphan-word line endings HEAVILY (they violate the
+        // convention). We reward balanced line lengths (closer to 50/50).
+        // We reward breaks that land immediately after a word ending in
+        // ':', '.', ',', ';' \u2014 punctuation is a natural reading pause.
+        // We penalise trivially short line 1s (e.g., breaking after just
+        // "Chapter 1:") \u2014 a TOC entry should carry meaningful content on
+        // its first line, not just the chapter marker.
+        const scoreSplit = function(i) {
+          if (!fitsBoth(i)) return Infinity;
+          const line1LastWord = words[i - 1];
+          let score = 0;
+          // Orphan at line 1 end: hard penalty.
+          const bareLast = line1LastWord.toLowerCase().replace(/[.,:;!?]+$/, "");
+          if (TOC_ORPHAN_WORDS.has(bareLast)) score += 1000;
+          // Bonus if line 1 ends with sentence/clause punctuation \u2014 a
+          // colon, period, comma, or semicolon. These are natural pauses.
+          if (/[:.,;]$/.test(line1LastWord)) score -= 30;
+          const w1 = doc.getTextWidth(words.slice(0, i).join(" "));
+          const w2 = doc.getTextWidth(words.slice(i).join(" "));
+          // Penalise a line 1 that's much shorter than line 2 \u2014 keeps
+          // "Chapter 1:" alone from beating "Chapter 1: Confront." even
+          // though both end in punctuation.
+          if (w1 < maxWidth * 0.35) score += 20;
+          // Balance: reward splits close to 50/50 by width.
+          score += Math.abs(w1 - w2) / 10;
+          return score;
+        };
+
+        // Search all viable 2-line split points (1..maxGreedyI) and pick
+        // the one with the lowest score. If several tie, prefer the more
+        // balanced (later i, so line 1 packs closer to full).
+        let bestI = -1, bestScore = Infinity;
+        for (let i = 1; i <= maxGreedyI; i++) {
+          const s = scoreSplit(i);
+          if (s < bestScore) { bestScore = s; bestI = i; }
+        }
+        if (bestI > 0 && bestScore < Infinity) {
+          return [words.slice(0, bestI).join(" "), words.slice(bestI).join(" ")];
+        }
+        // No 2-line split fits at maxWidth (title is REALLY long) \u2014
+        // fall back to jsPDF's greedy wrap which will produce 3+ lines.
+        return doc.splitTextToSize(text, maxWidth);
+      }
+
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
         if (ch.includeInToc === false) continue;
@@ -3080,7 +3168,7 @@
         // (~1em) from the start of the title so they visually attach to
         // the first line as part of the same entry rather than looking
         // like a separate flush-left entry below.
-        const titleLines = doc.splitTextToSize(displayTitle, maxTitleWidth);
+        const titleLines = smartTOCWrap(displayTitle, maxTitleWidth, entryStyle);
         const lastLineIdx = titleLines.length - 1;
         const tocWrapIndent = Math.round(tocEntrySize * 1.2); // ~1em hanging indent
 
