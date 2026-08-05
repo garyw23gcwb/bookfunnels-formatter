@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.7",
+      version: "0.14.8",
       date: "2026-05-25",
       changes: [
+        "0.14.8 - Reader Bonus page rebuilt against a designer's five-point review. Gary's designer flagged: (1) headline barely larger than body (should be ~3× body, dominant), (2) headline break landing at 'What Is Your / Business Actually Keeping?' should be 'What Is Your Business / Actually Keeping?', (3) body centered when it should be justified so the black bars above and below read as a frame, (4) all inline emphasis (bold / italic) stripped by the renderer, (5) block floats high on the page instead of optically centred. Priority order given: emphasis first, then justification, then headline size. All five addressed: (a) NEW drawJustifiedRunLine helper — same segment format layoutRunsMixed produces, stretches inter-word spaces to fill targetWidth exactly, last line stays ragged-right per trade convention, underline segments still get their thin line drawn. (b) CTA body detection: containsFormatting picks the branch — parseInlineRuns + layoutRunsMixed + drawJustifiedRunLine when markers exist, breakIntoJustifiedLines + drawJustifiedLine when the copy is plain. Either way the output is LEFT-ALIGNED and JUSTIFIED, not centered — the block shape matches the width of the bars. (c) TITLE_SIZE bumped from SPEC.chapterTitleSize (17pt) to SPEC.bodySize × 2.4 (24pt default, 26.4pt spacious). Any bigger on a 5×8 column pushes wrap past 'What Is Your Business' and back to a three-word first line. TITLE_LINE_H tightened to TITLE_SIZE × 1.15 (tight display leading so multi-line headlines read as one block). (d) Vertical centering: the 0.40 upper-bias multiplier (which made the block sit noticeably above centre) is now 0.50 (dead centre). (e) EPUB matched: cta-title CSS lifted from 1.8em/line-height 1.2 to 2.4em/line-height 1.15/text-align center; cta-body from margin 2em 10% to margin 1.5em 0 with text-align justify and line-height 1.5; ctaBody EPUB emitter switched from bare esc() to inlineMarkdownToHtml so **bold** / *italic* / ***bolditalic*** / __underline__ render as real <strong>/<em>/<u> tags. GAP constants bumped a touch (HEADER_TO_TITLE 16→20, TITLE_TO_BODY 16→20, BODY_TO_URL 20→22, TITLE_TO_URL 22→24) to match the bigger headline's proportions. Author-side note: to get the emphasis the designer flagged (bold on 'in about two minutes, without opening your books', italic on the 'even if' clauses), the CTA body field in Step 1 has to actually contain the ** and * markers — the renderer now honours them, but doesn't invent them.",
         "0.14.7 - TOC wrap line 2 first letter now auto-capitalises for visual consistency across the entry block. Gary spotted the inconsistency: some entries wrapped as 'Chapter 5: ...That Runs / Without You' (line 2 starts capital) while others wrapped as 'Chapter 1: Confront. The Truth Behind / the Numbers' or 'Chapter 6: Take Control. From Reactive / to in Command' (line 2 starts lowercase). Reason: all titles were correct Chicago Title Case (§8.157 keeps articles / prepositions / coordinating conjunctions lowercase mid-title regardless of length), and the orphan-backtrack in smartTOCWrap sometimes pushes one of those words to the line-2 start — which is where the visual inconsistency shows up. Strict Chicago says leave lowercase (word function beats line position), and every Penguin / Knopf / Random House TOC I can find follows that rule. Modern trade practice increasingly overrides it for line-2 readability. Applied here: only the FIRST alphabetic character of line 2 is capitalised; the rest of line 2 (including further lowercase articles / preps) stays exactly as the author wrote it. Non-alphabetic prefixes (a numeral, a stray period) pass through and the capital lands on the first real letter. Result for Gary's book: 'the Numbers' → 'The Numbers', 'to in Command' → 'To in Command'. Every wrap line 2 now starts with a capital, matching the visual rhythm of the lines that were already capitalised. Line 1 casing is untouched — always was, always is, exactly what the author wrote.",
         "0.14.6 - TOC wrap now uses TWO widths (industry-standard split), tighter within-entry leading, and widow prevention. Gary's audit: line 1 was still wrapping too early, and asked what industry standards say about line height inside a wrapped entry vs between chapters. Three changes: (1) TWO WIDTHS: smartTOCWrap now takes maxLastLineWidth (211pt, reserves for dots + page number) AND maxContinuationWidth (252pt, full text column). Only the LAST line reserves for the page-number column; continuation lines extend to the full column edge. This is the Chicago §1.42-1.43 / Penguin / Knopf / Random House TOC convention — Chapter 3 goes from 'Chapter 3: Assess. What Your Numbers Are / Actually Telling You' (line 1 at 60% column) to 'Chapter 3: Assess. What Your Numbers Are Actually / Telling You' (line 1 at 95% column). (2) WIDOW PREVENTION: added MIN_LINE2_WORDS = 2. If greedy fit leaves a single-word tail on line 2 (e.g., 'You' or 'Business' alone), backtrack one word so line 2 has at least two. Chapter 5 was 'Build the System That Runs Without / You' (widow), now 'Build the System That Runs / Without You'. Same for Chapter 7's 'Business' widow. Orphan and widow checks are combined into one backtrack loop so satisfying one doesn't accidentally break the other. (3) WITHIN-ENTRY LEADING TIGHTENED: tocWrappedLineAdvance changed from tocEntrySize × 1.35 to × 1.2 (13.5pt → 12pt at 10pt body). Between-entry advance stays at lineHeight × 1.6 (24pt at 10pt body). Ratio between-to-within is now 2.0:1 — wrapped lines read as one unit, entries clearly separate. Convention (Bringhurst, New Hart's, real trade paperbacks): within 1.0-1.2× body, between 1.5-2.0× body leading. Continuation lines remain flush-left from v0.14.4. Orphan set unchanged from v0.14.3.",
         "0.14.5 - TOC wrap switched from scored best-break to greedy fit + orphan backtrack. Gary's complaint on v0.14.4: 'we don't need to wrap after the first word... only wrap when running out of room.' The previous scoring heuristic gave a strong bonus (-30) for line 1 ending with clause punctuation (':', '.', ',', ';'), which forced early breaks like 'Chapter 1: Confront.' on line 1 even when more of the title could fit — leaving line 1 visibly under-full. This matched a Chicago §1.43 reading but not published trade-paperback practice, which uses uniform greedy fit. New smartTOCWrap: (1) pack line 1 with as many words as fit within maxWidth, (2) if line 1 ends with an orphan word (article, preposition, conjunction, possessive determiner, or demonstrative determiner from the existing TOC_ORPHAN_WORDS set), backtrack one word at a time until it doesn't. That's the one hard rule Chicago, Bringhurst, New Hart's, and Penguin house style all agree on. Balance term, punctuation bonus, and short-line-1 penalty all removed. Fall back to jsPDF's splitTextToSize only when line 2's tail exceeds maxWidth (title needs 3+ lines). Chapter 1 now renders as 'Chapter 1: Confront. The Truth Behind / the Numbers' — line 1 filled to capacity, 'the' backtracked to line 2 so 'the Numbers' stays together. Continuation lines remain flush-left from v0.14.4.",
@@ -1551,6 +1552,44 @@
       }
     }
 
+    // Justified variant of drawRunLine. Same segment format from
+    // layoutRunsMixed (each token gets its own segment; whitespace tokens
+    // are separate). Stretches inter-word spaces so the line fills
+    // targetWidth exactly. Last line stays ragged-right per trade
+    // convention (industry-standard so the closing line doesn't get
+    // awkward river gaps). Underline runs still get their thin line
+    // drawn under the segment's rendered width.
+    function drawJustifiedRunLine(doc, segments, x, y, targetWidth, isLastLine, fontSize, fontFamily) {
+      if (!segments || segments.length === 0) return;
+      // Strip trailing whitespace segments — they shouldn't take space
+      // at the end of a rendered line.
+      let end = segments.length;
+      while (end > 0 && /^\s+$/.test(segments[end - 1].text)) end--;
+      const drawSegs = segments.slice(0, end);
+      if (drawSegs.length === 0) return;
+      let contentWidth = 0;
+      let spaceCount = 0;
+      for (const s of drawSegs) {
+        contentWidth += s.width;
+        if (/^\s+$/.test(s.text)) spaceCount++;
+      }
+      // No stretching on the last line (ragged-right convention) or when
+      // there are no inter-word spaces to distribute slack across.
+      const slack = (isLastLine || spaceCount === 0) ? 0 : (targetWidth - contentWidth);
+      const extraPerSpace = spaceCount > 0 ? slack / spaceCount : 0;
+      let cx = x;
+      for (const seg of drawSegs) {
+        doc.setFont(fontFamily, pdfStyleFor(seg.style)); doc.setFontSize(fontSize);
+        doc.text(seg.text, cx, y);
+        if (seg.style === "underline") {
+          doc.setLineWidth(0.4); doc.setDrawColor(30);
+          doc.line(cx, y + 1.5, cx + seg.width, y + 1.5);
+        }
+        cx += seg.width;
+        if (/^\s+$/.test(seg.text)) cx += extraPerSpace;
+      }
+    }
+
     // Detect a "scene break" / section break paragraph. Trade-book typography
     // uses three centered asterisks (or similar ornament) on their own line to
     // mark a narrative transition inside a chapter. Naïvely letting this fall
@@ -2336,20 +2375,28 @@
         const centerX = textX + textW / 2;
 
         // Layout constants.
-        // Title sized to MATCH the chapter title (SPEC.chapterTitleSize) so
-        // the Reader Bonus headline reads at the same display weight as a
-        // chapter opener.
-        // Body is set 2pt LARGER than the chapter body paragraph (rather
-        // than equal) because the Reader Bonus body is short, marketing-
-        // style copy that benefits from a bit more presence and read-from-
-        // across-the-room scannability. 10pt body → 12pt CTA body,
-        // 11pt body → 13pt CTA body. Line-height keeps the same ratio to
-        // font size that the chapter body uses, so the rhythm is
-        // consistent across the book.
+        //
+        // TITLE: dominant marketing headline, ~2.4× body. Sized to
+        // actually FILL the top of the page rather than reading as
+        // "slightly larger body." At 10pt body → 24pt title; at 11pt
+        // body → 26pt. Any bigger on a 5×8 column would push the wrap
+        // point past the "Chapter N: Business" boundary and force
+        // three-word first lines. Line advance tight at 1.15× title
+        // size so multi-line headlines read as one block.
+        //
+        // BODY: 2pt larger than chapter body (already the case before —
+        // marketing copy benefits from extra presence). Left-aligned
+        // and FULLY JUSTIFIED — the trade convention for CTA pages,
+        // since the block shape lets the dark bars above and below
+        // read as a frame instead of two floating rules with ragged
+        // text between them. Handles inline **bold** / *italic* /
+        // ***bolditalic*** / __underline__ markers via the same run
+        // path the chapter body uses, so authors can carry rhythm
+        // through the CTA copy.
         const HEADER_BAR_H = 40;
         const URL_BAR_H = 40;
-        const TITLE_SIZE = SPEC.chapterTitleSize;
-        const TITLE_LINE_H = 28;                  // matches chapter title baseline-to-baseline
+        const TITLE_SIZE = Math.round(SPEC.bodySize * 2.4);
+        const TITLE_LINE_H = Math.round(TITLE_SIZE * 1.15);
         const BODY_SIZE = SPEC.bodySize + 2;
         const BODY_LINE_H = BODY_SIZE * (SPEC.lineHeight / SPEC.bodySize);
 
@@ -2359,10 +2406,10 @@
         //   TITLE_TO_BODY:   last title baseline (= cap-bottom) -> body cap-top
         //   BODY_TO_URL:     last body baseline -> URL bar top
         //   TITLE_TO_URL:    last title baseline -> URL bar top (when no body)
-        const GAP_HEADER_TO_TITLE = 16;
-        const GAP_TITLE_TO_BODY = 16;
-        const GAP_BODY_TO_URL = 20;
-        const GAP_TITLE_TO_URL = 22;
+        const GAP_HEADER_TO_TITLE = 20;
+        const GAP_TITLE_TO_BODY = 20;
+        const GAP_BODY_TO_URL = 22;
+        const GAP_TITLE_TO_URL = 24;
 
         const titleCapH = TITLE_SIZE * SPEC.capHeightRatio;
         const bodyCapH = BODY_SIZE * SPEC.capHeightRatio;
@@ -2372,13 +2419,29 @@
           return barTopY + (barH / 2) + (fontSize * SPEC.capHeightRatio / 2);
         }
 
-        // Measure lines (full text-block width to match the bars above/below)
+        // Measure title lines using the smart wrap (avoids orphaned
+        // articles / prepositions on line 1 end for the same reasons
+        // it does in chapter openers).
         doc.setFont(BODY_FONT, "bold"); doc.setFontSize(TITLE_SIZE);
         const ctaLines = wrapTitle(bookData.ctaTitle || "", textW, TITLE_SIZE);
 
+        // Measure body. Detect inline formatting up front so we know
+        // which line-breaker to use: parseInlineRuns + layoutRunsMixed
+        // when markers are present, breakIntoJustifiedLines otherwise.
+        // Either way the OUTPUT is the number of visual lines used —
+        // needed for block-height math so vertical centering works.
         let bodyLines = [];
+        let bodyIsRuns = false;
         if (bookData.ctaBody) {
-          bodyLines = wrapText(bookData.ctaBody, textW, BODY_SIZE);
+          const ctaBodyText = bookData.ctaBody;
+          if (containsFormatting(ctaBodyText)) {
+            const runs = parseInlineRuns(ctaBodyText);
+            bodyLines = layoutRunsMixed(doc, runs, textW, BODY_SIZE, BODY_FONT);
+            bodyIsRuns = true;
+          } else {
+            bodyLines = breakIntoJustifiedLines(doc, ctaBodyText, textW, BODY_SIZE, BODY_FONT);
+            bodyIsRuns = false;
+          }
         }
 
         // Visual height of each multi-line block = capH + (N-1) * lineHeight
@@ -2394,9 +2457,14 @@
           totalH += (bodyLines.length > 0 ? GAP_BODY_TO_URL : GAP_TITLE_TO_URL) + URL_BAR_H;
         }
 
-        // Vertically center the block on the page with a slight upper bias.
+        // Vertically center the block on the page. Previously used a
+        // 0.40 upper-bias factor which made the block sit noticeably
+        // above centre — designer feedback: "the block floats high."
+        // Dead-centre (0.50) matches trade-book CTA convention where
+        // the header + title + body + URL sit as an optically-balanced
+        // rectangle on the page.
         const availableH = SPEC.pageH;
-        let y = Math.max(60, (availableH - totalH) * 0.40);
+        let y = Math.max(60, (availableH - totalH) * 0.50);
 
         // READER BONUS header bar
         doc.setFillColor(30, 30, 30);
@@ -2416,15 +2484,24 @@
           lastTitleBaseline = baseline;
         }
 
-        // Description text — first cap-top sits GAP_TITLE_TO_BODY below the last title baseline
+        // Description text — first cap-top sits GAP_TITLE_TO_BODY below
+        // the last title baseline. Rendered LEFT-ALIGNED and JUSTIFIED
+        // so the block shape matches the width of the bars above and
+        // below. Inline emphasis (bold / italic / underline) is
+        // preserved.
         let lastVisibleBaseline = lastTitleBaseline;
         if (bodyLines.length > 0) {
           const bodyCapTop = lastTitleBaseline + GAP_TITLE_TO_BODY;
-          doc.setFontSize(BODY_SIZE); doc.setFont(BODY_FONT, "normal");
+          doc.setFontSize(BODY_SIZE); doc.setFont(BODY_FONT, "normal"); doc.setTextColor(30);
           let lastBodyBaseline = bodyCapTop + bodyCapH;
           for (let i = 0; i < bodyLines.length; i++) {
             const baseline = bodyCapTop + bodyCapH + i * BODY_LINE_H;
-            doc.text(bodyLines[i], centerX, baseline, { align: "center" });
+            const isLast = (i === bodyLines.length - 1);
+            if (bodyIsRuns) {
+              drawJustifiedRunLine(doc, bodyLines[i], textX, baseline, textW, isLast, BODY_SIZE, BODY_FONT);
+            } else {
+              drawJustifiedLine(doc, bodyLines[i], textX, baseline, textW, isLast);
+            }
             lastBodyBaseline = baseline;
           }
           lastVisibleBaseline = lastBodyBaseline;
@@ -4045,8 +4122,8 @@
         // a chapter opener. Body at 1.2em = ~+2pt over the body
         // paragraph: short, marketing-style copy that benefits from a
         // bit more presence than the chapter body.
-        'div.cta-page .cta-title { font-size: 1.8em; font-weight: bold; margin: 1em 0; line-height: 1.2; }',
-        'div.cta-page .cta-body { font-size: 1.2em; margin: 2em 10%; }',
+        'div.cta-page .cta-title { font-size: 2.4em; font-weight: bold; margin: 0.8em 0; line-height: 1.15; text-align: center; }',
+        'div.cta-page .cta-body { font-size: 1.2em; margin: 1.5em 0; text-align: justify; line-height: 1.5; }',
         'div.cta-page .cta-url { background: #111; color: #fff; padding: 0.8em; margin: 2em 0; font-weight: bold; word-break: break-all; }',
       ].join("\n");
 
@@ -4114,7 +4191,11 @@
         let ctaBody = '<div class="cta-page">\n';
         ctaBody += '  <div class="cta-banner">READER BONUS</div>\n';
         ctaBody += '  <p class="cta-title">' + esc(bookData.ctaTitle) + '</p>\n';
-        if (bookData.ctaBody) ctaBody += '  <p class="cta-body">' + esc(bookData.ctaBody) + '</p>\n';
+        // CTA body runs through the markdown-lite converter so **bold**,
+        // *italic*, ***bolditalic*** and __underline__ markers render as
+        // proper <strong> / <em> / <u> tags in the EPUB — matches the
+        // PDF's new inline-formatting path in renderCTAPage.
+        if (bookData.ctaBody) ctaBody += '  <p class="cta-body">' + inlineMarkdownToHtml(bookData.ctaBody, esc) + '</p>\n';
         if (bookData.ctaUrl) ctaBody += '  <div class="cta-url">' + esc(bookData.ctaUrl) + '</div>\n';
         ctaBody += '</div>';
         oebps.file("cta-front.xhtml", xhtmlDoc("Reader Bonus", ctaBody));
