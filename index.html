@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.2",
+      version: "0.14.3",
       date: "2026-05-25",
       changes: [
+        "0.14.3 - TOC smart-wrap orphan set expanded to include possessive and demonstrative determiners. Gary re-tested the Looks Profitable TOC and Chapter 3 still broke as 'Chapter 3: Assess. What Your / Numbers Are Actually Telling You' — 'Your' stranded at line 1 end, orphaned from the noun 'Numbers' it modifies. Same forward-attachment rule as articles ('the numbers') applies to possessive determiners ('your numbers', 'his book') and demonstrative determiners ('this chapter', 'those numbers'). Added to TOC_ORPHAN_WORDS: my, your, his, her, its, our, their (possessives); this, that, these, those (demonstratives). Not added: the standalone-pronoun forms (mine, yours, ours, theirs) — those CAN legitimately end a line. Chapter 3 now breaks as 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You'. Every other well-formed title still breaks at its action-verb boundary as in 0.14.2. Note for Gary: the Looks Profitable manuscript upload appears to have 9 phantom chapters whose titles are the SOURCE document's TOC lines (each ending with a page number like '9', '17', '22'…) plus the real chapters below them — those phantom entries push wrap targets past the 211pt column limit and force less-ideal splits. Deleting the phantom chapters on Step 3 will let every real chapter break at its verb boundary as intended.",
         "0.14.2 - TOC entries now break at natural clause boundaries instead of orphaning articles and prepositions. Gary noticed the Looks Profitable interior had 'Chapter 1: Confront. The Truth Behind the / Numbers' — 'the' stranded at end of line 1, 'Numbers' orphaned alone on line 2 — and similar issues on Chapters 3, 5, 6, 7. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style): a TOC line must never end with an article ('a', 'an', 'the') or a preposition / conjunction ('of', 'in', 'on', 'to', 'for', 'and'...) — those words attach forward to the noun they modify, so they must stay on the SAME line as that noun. Breaks at punctuation (colon, period, comma) are the strongest natural pause and preferred over anything else. The previous renderer used jsPDF's built-in splitTextToSize, a greedy word-fit algorithm with zero awareness of typographic conventions — it happily orphaned articles at line ends. New helper smartTOCWrap replaces that call in the TOC path (chapter opener wrap and everything else untouched). It scores every viable 2-line split with a small heuristic: hard penalty for orphan words at line 1 end, reward for line 1 ending with clause punctuation, small penalty for a trivially-short line 1 (keeps 'Chapter 1:' alone from beating 'Chapter 1: Confront.'), and a balance term so both lines end up close to equal width. For Gary's book: 'Chapter 1: Confront. / The Truth Behind the Numbers', 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You', 'Chapter 5: Implement. / Build the System That Runs Without You', 'Chapter 6: Take Control. / From Reactive to in Command', 'Chapter 7: Yield. / The Returns of a Financially Clear Business' — every break is now at the action-verb boundary with the descriptive clause intact on line 2. Single-line entries (short titles that fit) are unchanged. 3+ line entries (extremely long titles) fall back to splitTextToSize.",
         "0.14.1 - Markdown export replaced with plain-text (.txt) export for Tinybook Audio Studio. Markdown turned out to be the wrong format — TTS engines read asterisks, hash marks, and pipes literally ('asterisk asterisk Mountain asterisk asterisk') which ruins narration. New generateText() output is clean prose: book title + subtitle + author at the top, then each chapter prefixed by 'Chapter N: Title' on its own line, epigraph with em-dash attribution, body content with ALL markdown markers stripped via a new stripInlineMarkers helper (***/**/*/__ removed) and a flattenBody helper that walks the same paragraph splitter / classifier the PDF and EPUB use so the chunking matches. Scene breaks become blank lines (a pause cue, not three spoken asterisks). Tables flatten to 'cell — cell — cell' rows. Images are dropped. List bullets are dropped, item text kept. Alignment prefixes already stripped by classifyParagraph. Step 3 button reads 'Generate Text (Audio)', Step 4 download reads 'Download Text (Audio)', filename pattern is {Title_With_Underscores}_Audio.txt. State variable renamed from mdUrl to txtUrl across the new-project / load-project / back-to-preview reset paths. Audiobook-step tip in the Step 4 panel updated to mention .txt → Tinybook Audio Studio.",
         "0.14.0 - Markdown export added as a third output alongside PDF and EPUB. Intended primary use: upload to Tinybook Audio Studio for the audiobook version. New generateMarkdown(bookData, chapters, onProgress) builds a single .md file with the book title + subtitle + author block at the top, optional Reader Bonus, optional dedication, every chapter as a level-1 heading with epigraph as blockquote and body as-is, plus the back-of-book CTA repeated at the end. STRIPPED from the markdown: copyright page (legal boilerplate, not narrated), TOC (audiobooks don't have one), inline image markers (audio can't render images), alignment prefixes (:left:/:center:/:right: — audio is linear). PRESERVED as-is so audio narration can use them as emphasis cues: **bold**, *italic*, ***bolditalic***, __underline__, body H2/H3 subheadings, markdown tables, scene breaks (* * *), bulleted and numbered lists. Step 3 now has three side-by-side buttons (Generate Markdown / Generate EPUB / Generate PDF), Step 4 shows a Download Markdown button alongside the PDF and EPUB ones plus an 'Also Generate Markdown' option if you only ran one format. Filename pattern matches the others: {Title_With_Underscores}.md. The autosave / project-switch / new-project paths also reset mdUrl so blob URLs from the previous session don't bleed across.",
@@ -3058,11 +3059,23 @@
       // it happily orphans articles at line ends \u2014 this helper replaces
       // that call for TOC titles specifically.
       const TOC_ORPHAN_WORDS = new Set([
+        // Articles
         "a", "an", "the",
+        // Prepositions
         "of", "in", "on", "at", "to", "for", "with", "by", "from",
         "up", "into", "onto", "over", "under", "about",
+        // Coordinating conjunctions
         "and", "or", "but", "nor", "yet", "so",
-        "is", "as", "if"
+        // Copula and small connectors that shouldn't end a line
+        "is", "as", "if",
+        // Possessive determiners — attach forward to the noun they modify
+        // just like articles do ("your numbers", "his book"). Not adding
+        // "mine / yours / his / hers / ours / theirs" because those forms
+        // are stand-alone pronouns that CAN end a line.
+        "my", "your", "his", "her", "its", "our", "their",
+        // Demonstrative determiners — same forward-attaching rule
+        // ("this chapter", "those numbers").
+        "this", "that", "these", "those"
       ]);
       function smartTOCWrap(text, maxWidth, fontStyle) {
         doc.setFont(BODY_FONT, fontStyle); doc.setFontSize(tocEntrySize);
