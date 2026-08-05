@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.3",
+      version: "0.14.4",
       date: "2026-05-25",
       changes: [
+        "0.14.4 - TOC continuation lines now sit FLUSH-LEFT instead of hanging-indented. Reverts the ~1em hanging indent added in v0.13.32. Gary pointed out that the indented continuation line looks visually off-balance at 5×8 trim, and the citation used in v0.13.32 for the hanging indent (Chicago Manual §1.43) was overreach — real-world published trade paperbacks (Penguin Modern Classics, Knopf hardcovers, Random House Trade Paperbacks, Bringhurst's own reference works) overwhelmingly use flush-left continuation in the TOC. The wrap point still lands at the natural clause boundary from v0.14.2/v0.14.3's smartTOCWrap, but both lines of a wrapped entry now start at the same tocTextX position. Dot leaders and page number still right-align to the same page-number column on the LAST line only. Removed the tocWrapIndent constant and the two conditional lineX calculations that applied it. Single-line entries are unaffected.",
         "0.14.3 - TOC smart-wrap orphan set expanded to include possessive and demonstrative determiners. Gary re-tested the Looks Profitable TOC and Chapter 3 still broke as 'Chapter 3: Assess. What Your / Numbers Are Actually Telling You' — 'Your' stranded at line 1 end, orphaned from the noun 'Numbers' it modifies. Same forward-attachment rule as articles ('the numbers') applies to possessive determiners ('your numbers', 'his book') and demonstrative determiners ('this chapter', 'those numbers'). Added to TOC_ORPHAN_WORDS: my, your, his, her, its, our, their (possessives); this, that, these, those (demonstratives). Not added: the standalone-pronoun forms (mine, yours, ours, theirs) — those CAN legitimately end a line. Chapter 3 now breaks as 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You'. Every other well-formed title still breaks at its action-verb boundary as in 0.14.2. Note for Gary: the Looks Profitable manuscript upload appears to have 9 phantom chapters whose titles are the SOURCE document's TOC lines (each ending with a page number like '9', '17', '22'…) plus the real chapters below them — those phantom entries push wrap targets past the 211pt column limit and force less-ideal splits. Deleting the phantom chapters on Step 3 will let every real chapter break at its verb boundary as intended.",
         "0.14.2 - TOC entries now break at natural clause boundaries instead of orphaning articles and prepositions. Gary noticed the Looks Profitable interior had 'Chapter 1: Confront. The Truth Behind the / Numbers' — 'the' stranded at end of line 1, 'Numbers' orphaned alone on line 2 — and similar issues on Chapters 3, 5, 6, 7. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style): a TOC line must never end with an article ('a', 'an', 'the') or a preposition / conjunction ('of', 'in', 'on', 'to', 'for', 'and'...) — those words attach forward to the noun they modify, so they must stay on the SAME line as that noun. Breaks at punctuation (colon, period, comma) are the strongest natural pause and preferred over anything else. The previous renderer used jsPDF's built-in splitTextToSize, a greedy word-fit algorithm with zero awareness of typographic conventions — it happily orphaned articles at line ends. New helper smartTOCWrap replaces that call in the TOC path (chapter opener wrap and everything else untouched). It scores every viable 2-line split with a small heuristic: hard penalty for orphan words at line 1 end, reward for line 1 ending with clause punctuation, small penalty for a trivially-short line 1 (keeps 'Chapter 1:' alone from beating 'Chapter 1: Confront.'), and a balance term so both lines end up close to equal width. For Gary's book: 'Chapter 1: Confront. / The Truth Behind the Numbers', 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You', 'Chapter 5: Implement. / Build the System That Runs Without You', 'Chapter 6: Take Control. / From Reactive to in Command', 'Chapter 7: Yield. / The Returns of a Financially Clear Business' — every break is now at the action-verb boundary with the descriptive clause intact on line 2. Single-line entries (short titles that fit) are unchanged. 3+ line entries (extremely long titles) fall back to splitTextToSize.",
         "0.14.1 - Markdown export replaced with plain-text (.txt) export for Tinybook Audio Studio. Markdown turned out to be the wrong format — TTS engines read asterisks, hash marks, and pipes literally ('asterisk asterisk Mountain asterisk asterisk') which ruins narration. New generateText() output is clean prose: book title + subtitle + author at the top, then each chapter prefixed by 'Chapter N: Title' on its own line, epigraph with em-dash attribution, body content with ALL markdown markers stripped via a new stripInlineMarkers helper (***/**/*/__ removed) and a flattenBody helper that walks the same paragraph splitter / classifier the PDF and EPUB use so the chunking matches. Scene breaks become blank lines (a pause cue, not three spoken asterisks). Tables flatten to 'cell — cell — cell' rows. Images are dropped. List bullets are dropped, item text kept. Alignment prefixes already stripped by classifyParagraph. Step 3 button reads 'Generate Text (Audio)', Step 4 download reads 'Download Text (Audio)', filename pattern is {Title_With_Underscores}_Audio.txt. State variable renamed from mdUrl to txtUrl across the new-project / load-project / back-to-preview reset paths. Audiobook-step tip in the Step 4 panel updated to mention .txt → Tinybook Audio Studio.",
@@ -3174,16 +3175,17 @@
         const maxTitleWidth = tocTextW - maxPageNumWidth - (gap * 2) - minDotsSpace;
 
         // Wrap long titles to multiple lines. Trade-book convention
-        // (Chicago Manual \u00a71.43, Bringhurst, New Hart's Rules, Penguin /
-        // Random House style): long chapter titles WRAP \u2014 they are not
-        // truncated. The page number aligns with the LAST line; only the
-        // last line carries dot leaders. CONTINUATION LINES ARE INDENTED
-        // (~1em) from the start of the title so they visually attach to
-        // the first line as part of the same entry rather than looking
-        // like a separate flush-left entry below.
+        // (Chicago Manual \u00a71.43, Bringhurst, New Hart's Rules, Penguin
+        // Modern Classics / Knopf / Random House Trade Paperbacks): long
+        // chapter titles WRAP \u2014 they are not truncated. The page number
+        // aligns with the LAST line; only the last line carries dot leaders.
+        // CONTINUATION LINES SIT FLUSH-LEFT with the start of the title.
+        // v0.13.32 tried a ~1em hanging indent citing Chicago \u00a71.43, but
+        // that was overreach \u2014 real-world published trade paperbacks
+        // overwhelmingly use flush-left continuation for TOC entries, and
+        // the hanging indent looked visually off-balance at 5\u00d78 trim.
         const titleLines = smartTOCWrap(displayTitle, maxTitleWidth, entryStyle);
         const lastLineIdx = titleLines.length - 1;
-        const tocWrapIndent = Math.round(tocEntrySize * 1.2); // ~1em hanging indent
 
         // If the whole entry won't fit on the current TOC page, break first
         // so the wrapped title isn't split across pages.
@@ -3196,20 +3198,18 @@
         }
 
         // Draw any continuation lines (everything except the last) first \u2014
-        // plain title text, no page number, no dots. Line 0 is at the
-        // title's start (tocTextX); line 1+ are indented.
+        // plain title text, no page number, no dots. All lines flush-left
+        // at tocTextX per convention.
         for (let li = 0; li < lastLineIdx; li++) {
-          const lineX = (li === 0) ? tocTextX : (tocTextX + tocWrapIndent);
-          doc.text(titleLines[li], lineX, ty);
+          doc.text(titleLines[li], tocTextX, ty);
           ty += tocWrappedLineAdvance;
         }
 
-        // Draw the last line with page number + dot leaders. If the
-        // entry is multi-line, the last line is a continuation line
-        // and gets the hanging indent too.
+        // Draw the last line with page number + dot leaders, also
+        // flush-left at tocTextX.
         const lastLine = titleLines[lastLineIdx];
         const lastLineWidth = doc.getTextWidth(lastLine);
-        const lastLineX = (lastLineIdx === 0) ? tocTextX : (tocTextX + tocWrapIndent);
+        const lastLineX = tocTextX;
         doc.text(lastLine, lastLineX, ty);
 
         const pageNumX = tocTextX + tocTextW;
