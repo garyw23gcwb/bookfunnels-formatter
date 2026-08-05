@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.6",
+      version: "0.14.7",
       date: "2026-05-25",
       changes: [
+        "0.14.7 - TOC wrap line 2 first letter now auto-capitalises for visual consistency across the entry block. Gary spotted the inconsistency: some entries wrapped as 'Chapter 5: ...That Runs / Without You' (line 2 starts capital) while others wrapped as 'Chapter 1: Confront. The Truth Behind / the Numbers' or 'Chapter 6: Take Control. From Reactive / to in Command' (line 2 starts lowercase). Reason: all titles were correct Chicago Title Case (§8.157 keeps articles / prepositions / coordinating conjunctions lowercase mid-title regardless of length), and the orphan-backtrack in smartTOCWrap sometimes pushes one of those words to the line-2 start — which is where the visual inconsistency shows up. Strict Chicago says leave lowercase (word function beats line position), and every Penguin / Knopf / Random House TOC I can find follows that rule. Modern trade practice increasingly overrides it for line-2 readability. Applied here: only the FIRST alphabetic character of line 2 is capitalised; the rest of line 2 (including further lowercase articles / preps) stays exactly as the author wrote it. Non-alphabetic prefixes (a numeral, a stray period) pass through and the capital lands on the first real letter. Result for Gary's book: 'the Numbers' → 'The Numbers', 'to in Command' → 'To in Command'. Every wrap line 2 now starts with a capital, matching the visual rhythm of the lines that were already capitalised. Line 1 casing is untouched — always was, always is, exactly what the author wrote.",
         "0.14.6 - TOC wrap now uses TWO widths (industry-standard split), tighter within-entry leading, and widow prevention. Gary's audit: line 1 was still wrapping too early, and asked what industry standards say about line height inside a wrapped entry vs between chapters. Three changes: (1) TWO WIDTHS: smartTOCWrap now takes maxLastLineWidth (211pt, reserves for dots + page number) AND maxContinuationWidth (252pt, full text column). Only the LAST line reserves for the page-number column; continuation lines extend to the full column edge. This is the Chicago §1.42-1.43 / Penguin / Knopf / Random House TOC convention — Chapter 3 goes from 'Chapter 3: Assess. What Your Numbers Are / Actually Telling You' (line 1 at 60% column) to 'Chapter 3: Assess. What Your Numbers Are Actually / Telling You' (line 1 at 95% column). (2) WIDOW PREVENTION: added MIN_LINE2_WORDS = 2. If greedy fit leaves a single-word tail on line 2 (e.g., 'You' or 'Business' alone), backtrack one word so line 2 has at least two. Chapter 5 was 'Build the System That Runs Without / You' (widow), now 'Build the System That Runs / Without You'. Same for Chapter 7's 'Business' widow. Orphan and widow checks are combined into one backtrack loop so satisfying one doesn't accidentally break the other. (3) WITHIN-ENTRY LEADING TIGHTENED: tocWrappedLineAdvance changed from tocEntrySize × 1.35 to × 1.2 (13.5pt → 12pt at 10pt body). Between-entry advance stays at lineHeight × 1.6 (24pt at 10pt body). Ratio between-to-within is now 2.0:1 — wrapped lines read as one unit, entries clearly separate. Convention (Bringhurst, New Hart's, real trade paperbacks): within 1.0-1.2× body, between 1.5-2.0× body leading. Continuation lines remain flush-left from v0.14.4. Orphan set unchanged from v0.14.3.",
         "0.14.5 - TOC wrap switched from scored best-break to greedy fit + orphan backtrack. Gary's complaint on v0.14.4: 'we don't need to wrap after the first word... only wrap when running out of room.' The previous scoring heuristic gave a strong bonus (-30) for line 1 ending with clause punctuation (':', '.', ',', ';'), which forced early breaks like 'Chapter 1: Confront.' on line 1 even when more of the title could fit — leaving line 1 visibly under-full. This matched a Chicago §1.43 reading but not published trade-paperback practice, which uses uniform greedy fit. New smartTOCWrap: (1) pack line 1 with as many words as fit within maxWidth, (2) if line 1 ends with an orphan word (article, preposition, conjunction, possessive determiner, or demonstrative determiner from the existing TOC_ORPHAN_WORDS set), backtrack one word at a time until it doesn't. That's the one hard rule Chicago, Bringhurst, New Hart's, and Penguin house style all agree on. Balance term, punctuation bonus, and short-line-1 penalty all removed. Fall back to jsPDF's splitTextToSize only when line 2's tail exceeds maxWidth (title needs 3+ lines). Chapter 1 now renders as 'Chapter 1: Confront. The Truth Behind / the Numbers' — line 1 filled to capacity, 'the' backtracked to line 2 so 'the Numbers' stays together. Continuation lines remain flush-left from v0.14.4.",
         "0.14.4 - TOC continuation lines now sit FLUSH-LEFT instead of hanging-indented. Reverts the ~1em hanging indent added in v0.13.32. Gary pointed out that the indented continuation line looks visually off-balance at 5×8 trim, and the citation used in v0.13.32 for the hanging indent (Chicago Manual §1.43) was overreach — real-world published trade paperbacks (Penguin Modern Classics, Knopf hardcovers, Random House Trade Paperbacks, Bringhurst's own reference works) overwhelmingly use flush-left continuation in the TOC. The wrap point still lands at the natural clause boundary from v0.14.2/v0.14.3's smartTOCWrap, but both lines of a wrapped entry now start at the same tocTextX position. Dot leaders and page number still right-align to the same page-number column on the LAST line only. Removed the tocWrapIndent constant and the two conditional lineX calculations that applied it. Single-line entries are unaffected.",
@@ -3158,10 +3159,25 @@
         // to come after it). If it doesn't, the title is genuinely longer
         // than 2 lines' worth of column \u2014 fall back to jsPDF's greedy
         // wrap which will produce 3+ lines using the last-line budget.
-        const line2 = words.slice(i).join(" ");
+        let line2 = words.slice(i).join(" ");
         if (doc.getTextWidth(line2) > maxLastLineWidth) {
           return doc.splitTextToSize(text, maxLastLineWidth);
         }
+        // Capitalise the first letter of line 2 when the orphan
+        // backtrack has pushed an article / preposition to the line
+        // start ('the Numbers', 'to in Command'). Strict Chicago \u00a78.157
+        // keeps those words lowercase because their WORD FUNCTION
+        // determines case, not their line position \u2014 but modern trade
+        // publishers routinely override this so every line of a TOC
+        // entry starts with a capital, matching the reader's intuition
+        // and giving the block visual consistency. Only touch the very
+        // first letter; the rest of line 2 (including any further
+        // lowercase articles / preps) stays exactly as the author wrote
+        // it. Non-alphabetic prefixes (a numeral, a punctuation mark)
+        // pass through and the capital lands on the first real letter.
+        line2 = line2.replace(/^([^A-Za-z]*)([a-z])/, function(_, prefix, letter) {
+          return prefix + letter.toUpperCase();
+        });
         return [words.slice(0, i).join(" "), line2];
       }
 
