@@ -158,9 +158,10 @@
     };
 
     const APP_VERSION = {
-      version: "0.14.4",
+      version: "0.14.5",
       date: "2026-05-25",
       changes: [
+        "0.14.5 - TOC wrap switched from scored best-break to greedy fit + orphan backtrack. Gary's complaint on v0.14.4: 'we don't need to wrap after the first word... only wrap when running out of room.' The previous scoring heuristic gave a strong bonus (-30) for line 1 ending with clause punctuation (':', '.', ',', ';'), which forced early breaks like 'Chapter 1: Confront.' on line 1 even when more of the title could fit — leaving line 1 visibly under-full. This matched a Chicago §1.43 reading but not published trade-paperback practice, which uses uniform greedy fit. New smartTOCWrap: (1) pack line 1 with as many words as fit within maxWidth, (2) if line 1 ends with an orphan word (article, preposition, conjunction, possessive determiner, or demonstrative determiner from the existing TOC_ORPHAN_WORDS set), backtrack one word at a time until it doesn't. That's the one hard rule Chicago, Bringhurst, New Hart's, and Penguin house style all agree on. Balance term, punctuation bonus, and short-line-1 penalty all removed. Fall back to jsPDF's splitTextToSize only when line 2's tail exceeds maxWidth (title needs 3+ lines). Chapter 1 now renders as 'Chapter 1: Confront. The Truth Behind / the Numbers' — line 1 filled to capacity, 'the' backtracked to line 2 so 'the Numbers' stays together. Continuation lines remain flush-left from v0.14.4.",
         "0.14.4 - TOC continuation lines now sit FLUSH-LEFT instead of hanging-indented. Reverts the ~1em hanging indent added in v0.13.32. Gary pointed out that the indented continuation line looks visually off-balance at 5×8 trim, and the citation used in v0.13.32 for the hanging indent (Chicago Manual §1.43) was overreach — real-world published trade paperbacks (Penguin Modern Classics, Knopf hardcovers, Random House Trade Paperbacks, Bringhurst's own reference works) overwhelmingly use flush-left continuation in the TOC. The wrap point still lands at the natural clause boundary from v0.14.2/v0.14.3's smartTOCWrap, but both lines of a wrapped entry now start at the same tocTextX position. Dot leaders and page number still right-align to the same page-number column on the LAST line only. Removed the tocWrapIndent constant and the two conditional lineX calculations that applied it. Single-line entries are unaffected.",
         "0.14.3 - TOC smart-wrap orphan set expanded to include possessive and demonstrative determiners. Gary re-tested the Looks Profitable TOC and Chapter 3 still broke as 'Chapter 3: Assess. What Your / Numbers Are Actually Telling You' — 'Your' stranded at line 1 end, orphaned from the noun 'Numbers' it modifies. Same forward-attachment rule as articles ('the numbers') applies to possessive determiners ('your numbers', 'his book') and demonstrative determiners ('this chapter', 'those numbers'). Added to TOC_ORPHAN_WORDS: my, your, his, her, its, our, their (possessives); this, that, these, those (demonstratives). Not added: the standalone-pronoun forms (mine, yours, ours, theirs) — those CAN legitimately end a line. Chapter 3 now breaks as 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You'. Every other well-formed title still breaks at its action-verb boundary as in 0.14.2. Note for Gary: the Looks Profitable manuscript upload appears to have 9 phantom chapters whose titles are the SOURCE document's TOC lines (each ending with a page number like '9', '17', '22'…) plus the real chapters below them — those phantom entries push wrap targets past the 211pt column limit and force less-ideal splits. Deleting the phantom chapters on Step 3 will let every real chapter break at its verb boundary as intended.",
         "0.14.2 - TOC entries now break at natural clause boundaries instead of orphaning articles and prepositions. Gary noticed the Looks Profitable interior had 'Chapter 1: Confront. The Truth Behind the / Numbers' — 'the' stranded at end of line 1, 'Numbers' orphaned alone on line 2 — and similar issues on Chapters 3, 5, 6, 7. Trade-book convention (Chicago Manual §1.42-1.43, Bringhurst, New Hart's Rules, Penguin / Random House style): a TOC line must never end with an article ('a', 'an', 'the') or a preposition / conjunction ('of', 'in', 'on', 'to', 'for', 'and'...) — those words attach forward to the noun they modify, so they must stay on the SAME line as that noun. Breaks at punctuation (colon, period, comma) are the strongest natural pause and preferred over anything else. The previous renderer used jsPDF's built-in splitTextToSize, a greedy word-fit algorithm with zero awareness of typographic conventions — it happily orphaned articles at line ends. New helper smartTOCWrap replaces that call in the TOC path (chapter opener wrap and everything else untouched). It scores every viable 2-line split with a small heuristic: hard penalty for orphan words at line 1 end, reward for line 1 ending with clause punctuation, small penalty for a trivially-short line 1 (keeps 'Chapter 1:' alone from beating 'Chapter 1: Confront.'), and a balance term so both lines end up close to equal width. For Gary's book: 'Chapter 1: Confront. / The Truth Behind the Numbers', 'Chapter 3: Assess. / What Your Numbers Are Actually Telling You', 'Chapter 5: Implement. / Build the System That Runs Without You', 'Chapter 6: Take Control. / From Reactive to in Command', 'Chapter 7: Yield. / The Returns of a Financially Clear Business' — every break is now at the action-verb boundary with the descriptive clause intact on line 2. Single-line entries (short titles that fit) are unchanged. 3+ line entries (extremely long titles) fall back to splitTextToSize.",
@@ -3084,66 +3085,43 @@
         const words = text.split(/\s+/).filter(Boolean);
         if (words.length < 2) return doc.splitTextToSize(text, maxWidth);
 
-        // Compute the greedy MAX split point i where words[0..i-1] still
-        // fits on a single line at maxWidth. We prefer break points AT
-        // OR BEFORE this greedy cap so both lines stay within maxWidth.
-        let maxGreedyI = 0;
-        for (let i = 1; i <= words.length; i++) {
-          const line = words.slice(0, i).join(" ");
-          if (doc.getTextWidth(line) <= maxWidth) maxGreedyI = i;
+        // Greedy fit: pack as many words onto line 1 as fit within
+        // maxWidth. This matches published trade-paperback practice
+        // (Penguin, Knopf, Random House) \u2014 the title fills line 1 to
+        // capacity and only spills over when it genuinely runs out of
+        // room. Breaking earlier at a punctuation "natural pause" was
+        // Gary's specific complaint about v0.14.2/v0.14.3: it left
+        // line 1 too short and made the entry look front-heavy.
+        let i = 0;
+        for (let n = 1; n <= words.length; n++) {
+          if (doc.getTextWidth(words.slice(0, n).join(" ")) <= maxWidth) i = n;
           else break;
         }
-        // Also require the remaining tail to fit on line 2.
-        const fitsBoth = function(i) {
-          if (i < 1 || i >= words.length) return false;
-          const a = words.slice(0, i).join(" ");
-          const b = words.slice(i).join(" ");
-          return doc.getTextWidth(a) <= maxWidth && doc.getTextWidth(b) <= maxWidth;
-        };
+        if (i === 0) return doc.splitTextToSize(text, maxWidth);
 
-        // Score a candidate split point. Lower score = better.
-        // We penalise orphan-word line endings HEAVILY (they violate the
-        // convention). We reward balanced line lengths (closer to 50/50).
-        // We reward breaks that land immediately after a word ending in
-        // ':', '.', ',', ';' \u2014 punctuation is a natural reading pause.
-        // We penalise trivially short line 1s (e.g., breaking after just
-        // "Chapter 1:") \u2014 a TOC entry should carry meaningful content on
-        // its first line, not just the chapter marker.
-        const scoreSplit = function(i) {
-          if (!fitsBoth(i)) return Infinity;
-          const line1LastWord = words[i - 1];
-          let score = 0;
-          // Orphan at line 1 end: hard penalty.
-          const bareLast = line1LastWord.toLowerCase().replace(/[.,:;!?]+$/, "");
-          if (TOC_ORPHAN_WORDS.has(bareLast)) score += 1000;
-          // Bonus if line 1 ends with sentence/clause punctuation \u2014 a
-          // colon, period, comma, or semicolon. These are natural pauses.
-          if (/[:.,;]$/.test(line1LastWord)) score -= 30;
-          const w1 = doc.getTextWidth(words.slice(0, i).join(" "));
-          const w2 = doc.getTextWidth(words.slice(i).join(" "));
-          // Penalise a line 1 that's much shorter than line 2 \u2014 keeps
-          // "Chapter 1:" alone from beating "Chapter 1: Confront." even
-          // though both end in punctuation.
-          if (w1 < maxWidth * 0.35) score += 20;
-          // Balance: reward splits close to 50/50 by width.
-          score += Math.abs(w1 - w2) / 10;
-          return score;
+        // Backtrack if line 1 would end with an orphan word \u2014 an article,
+        // preposition, conjunction, possessive determiner, or demonstrative
+        // determiner. Those words attach forward to the noun they modify,
+        // so leaving them at line end orphans the noun on line 2. This is
+        // the one hard typographic rule Chicago \u00a71.42, Bringhurst, New
+        // Hart's, and Penguin house style all agree on. Move the orphan
+        // word (and any consecutive orphan words before it) down to line 2.
+        const isOrphan = function(w) {
+          const bare = w.toLowerCase().replace(/[.,:;!?]+$/, "");
+          return TOC_ORPHAN_WORDS.has(bare);
         };
+        while (i > 1 && isOrphan(words[i - 1])) i--;
 
-        // Search all viable 2-line split points (1..maxGreedyI) and pick
-        // the one with the lowest score. If several tie, prefer the more
-        // balanced (later i, so line 1 packs closer to full).
-        let bestI = -1, bestScore = Infinity;
-        for (let i = 1; i <= maxGreedyI; i++) {
-          const s = scoreSplit(i);
-          if (s < bestScore) { bestScore = s; bestI = i; }
+        // If the resulting line 2 tail doesn't fit at maxWidth (rare \u2014
+        // only happens when the title is longer than 2 lines' worth of
+        // column), fall back to jsPDF's built-in wrap which produces 3+
+        // lines. Uniform greedy fit is fine at that point; we've done
+        // our best on the primary break.
+        const line2 = words.slice(i).join(" ");
+        if (doc.getTextWidth(line2) > maxWidth) {
+          return doc.splitTextToSize(text, maxWidth);
         }
-        if (bestI > 0 && bestScore < Infinity) {
-          return [words.slice(0, bestI).join(" "), words.slice(bestI).join(" ")];
-        }
-        // No 2-line split fits at maxWidth (title is REALLY long) \u2014
-        // fall back to jsPDF's greedy wrap which will produce 3+ lines.
-        return doc.splitTextToSize(text, maxWidth);
+        return [words.slice(0, i).join(" "), line2];
       }
 
       for (let i = 0; i < chapters.length; i++) {
